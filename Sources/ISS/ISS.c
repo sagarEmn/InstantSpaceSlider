@@ -80,6 +80,8 @@ static bool followFingersEnabled = false;
 static bool followTracking = false;
 static double followLastProgress = 0.0;
 static double followLastDirection = 0.0;
+// Swipes inside Mission Control browse its view rather than switch spaces
+static bool followInMissionControl = false;
 
 // Progress changes smaller than this are finger jitter, not a change of direction
 static const double kFollowDirectionJitter = 0.002;
@@ -213,7 +215,7 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
 
     switch (phase) {
     case kCGSGesturePhaseBegan:
-        followTracking = !iss_is_expose_active() && !iss_is_mission_control_active();
+        followTracking = !iss_is_expose_active();
         followLastProgress = progress;
         followLastDirection = progress > 0.0 ? 1.0 : (progress < 0.0 ? -1.0 : 0.0);
         return event;
@@ -363,8 +365,15 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
             return vertical_swipe_override(event);
         }
         if (motion != kCGGestureMotionHorizontal || !swipeOverrideEnabled) return event;
-        if (followFingersEnabled && !iss_requires_event_augmentation()) {
-            return follow_fingers_swipe(event);
+        if (!iss_requires_event_augmentation()) {
+            if (CGEventGetIntegerValueField(event, kCGEventGesturePhase) == kCGSGesturePhaseBegan) {
+                followInMissionControl = iss_is_mission_control_active();
+            }
+            // Inside Mission Control the view follows the fingers in either mode;
+            // finish it on release like follow mode so a small swipe is snappy
+            if (followFingersEnabled || followInMissionControl) {
+                return follow_fingers_swipe(event);
+            }
         }
 
         CGSGesturePhase phase =
@@ -847,8 +856,12 @@ static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durati
  */
 static void iss_finish_followed_swipe(double progress, double lastDirection) {
     double target = 0.0;
-    // Moving away from the current space (or from rest) commits to the space on that side
-    if (lastDirection != 0.0 && (progress == 0.0 || (lastDirection > 0.0) == (progress > 0.0))) {
+    const bool movingAway = lastDirection != 0.0 && (progress == 0.0 || (lastDirection > 0.0) == (progress > 0.0));
+    if (movingAway && followInMissionControl) {
+        // Browsing Mission Control doesn't switch spaces; the Dock stops at the ends itself
+        target = lastDirection > 0.0 ? 1.0 : -1.0;
+    } else if (movingAway) {
+        // Moving away from the current space (or from rest) commits to the space on that side
         ISSDirection dir = iss_direction_from_gesture_value(lastDirection);
         ISSSpaceInfo info;
         const bool hasInfo = iss_get_space_info(&info);
@@ -867,7 +880,9 @@ static void iss_finish_followed_swipe(double progress, double lastDirection) {
 
     // A full slide's duration covers a full space; scale by the distance left
     const double durationMs = slideDurationMs * fabs(target - progress);
-    lastGestureTime = CFAbsoluteTimeGetCurrent() + durationMs / 1000.0;
+    if (!followInMissionControl) {
+        lastGestureTime = CFAbsoluteTimeGetCurrent() + durationMs / 1000.0;
+    }
     iss_enqueue_slide_request((ISSSlideRequest){
         .motion = kCGGestureMotionHorizontal,
         .postBegan = false,

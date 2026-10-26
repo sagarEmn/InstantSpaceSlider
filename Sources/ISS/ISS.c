@@ -120,6 +120,8 @@ static double gestureSpeed = 2000.0;
 static double slideDurationMs = ISS_DEFAULT_SLIDE_DURATION_MS;
 static dispatch_queue_t slideQueue = NULL;
 static atomic_uint pendingSlides = 0;
+// Release at instant velocity regardless of the speed setting; a slow release brings back the spring tail
+static const double kSlideReleaseVelocity = 2000.0;
 
 static ISSSwitchCallback switchCallback = NULL;
 
@@ -233,6 +235,15 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
         double velocity = CGEventGetDoubleValueField(event, kCGEventGestureSwipeVelocityX);
         double direction = fabs(velocity) >= kFollowReleaseVelocity ? (velocity > 0.0 ? 1.0 : -1.0)
                                                                     : followLastDirection;
+        if (followInMissionControl) {
+            // Synthetic progress confuses Mission Control's view, so let the real release
+            // through and just make it a hard flick in the last direction of movement
+            if (direction != 0.0) {
+                CGEventSetDoubleValueField(event, kCGEventGestureSwipeVelocityX, direction * kSlideReleaseVelocity);
+                CGEventSetDoubleValueField(event, kCGEventGestureSwipeVelocityY, direction * kSlideReleaseVelocity);
+            }
+            return event;
+        }
         iss_finish_followed_swipe(progress, direction);
         return NULL;
     }
@@ -776,8 +787,6 @@ static bool iss_post_dock_swipe(CGSGesturePhase phase, ISSDirection direction, d
 
 // Roughly one frame on a 120Hz display
 static const useconds_t kSlideFrameMicroseconds = 8333;
-// Release at instant velocity regardless of the speed setting; a slow release brings back the spring tail
-static const double kSlideReleaseVelocity = 2000.0;
 
 // Smallest non-zero progress; keeps the direction without visible travel
 static const double kMinimalProgress = 0.000016;

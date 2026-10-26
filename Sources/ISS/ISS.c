@@ -82,6 +82,7 @@ static double followLastProgress = 0.0;
 static double followLastDirection = 0.0;
 // Swipes inside Mission Control browse its view rather than switch spaces
 static bool followInMissionControl = false;
+static bool mission_control_on_screen(void);
 
 // Progress changes smaller than this are finger jitter, not a change of direction
 static const double kFollowDirectionJitter = 0.002;
@@ -348,7 +349,7 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
         }
         if (type == kCGEventKeyDown && !CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat)) {
             // Without a real swipe to copy, close if Mission Control looks open, otherwise open
-            const double sign = iss_is_mission_control_active() ? -kMissionControlOpenSign : kMissionControlOpenSign;
+            const double sign = mission_control_on_screen() ? -kMissionControlOpenSign : kMissionControlOpenSign;
             iss_enqueue_slide(kCGGestureMotionVertical, sign, slideDurationMs);
         }
         return NULL;
@@ -382,7 +383,7 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
         if (motion != kCGGestureMotionHorizontal || !swipeOverrideEnabled) return event;
         if (!iss_requires_event_augmentation()) {
             if (CGEventGetIntegerValueField(event, kCGEventGesturePhase) == kCGSGesturePhaseBegan) {
-                followInMissionControl = iss_is_mission_control_active();
+                followInMissionControl = mission_control_on_screen();
             }
             // Inside Mission Control the view follows the fingers in either mode;
             // finish it on release like follow mode so a small swipe is snappy
@@ -983,6 +984,17 @@ bool iss_is_expose_active(void) {
         kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
     if (!windowList) return false;
     bool result = iss_is_expose_detected_in_window_list(windowList);
+    CFRelease(windowList);
+    return result;
+}
+
+/// Mission Control check for the swipe overrides, which need it even when
+/// the "detection" setting (used for the OSD) is off
+static bool mission_control_on_screen(void) {
+    CFArrayRef windowList = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+    if (!windowList) return false;
+    bool result = iss_is_mission_control_detected_in_window_list(windowList);
     CFRelease(windowList);
     return result;
 }

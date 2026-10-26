@@ -210,6 +210,17 @@ static void iss_finish_followed_swipe(double progress, double lastDirection);
 
 // Let a real horizontal swipe through so the space follows the fingers, then
 // replace its release with a fast finish toward the last direction of movement.
+/** @brief Release speed for swipes inside Mission Control, from the Animation Speed slider.
+ *
+ * 2000 skips the animation entirely and real flicks are around 3-5. Around 40-80
+ * the slide is visible but fast, so scale from 60 at the default duration
+ * (24 at the slowest, 300 ms) up to instant at 0 ms.
+ */
+static double iss_mission_control_release_velocity(void) {
+    if (slideDurationMs <= 0.0) return kSlideReleaseVelocity;
+    return fmin(kSlideReleaseVelocity, 60.0 * ISS_DEFAULT_SLIDE_DURATION_MS / slideDurationMs);
+}
+
 static CGEventRef follow_fingers_swipe(CGEventRef event) {
     CGSGesturePhase phase =
         (CGSGesturePhase)CGEventGetIntegerValueField(event, kCGEventGesturePhase);
@@ -237,10 +248,11 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
                                                                     : followLastDirection;
         if (followInMissionControl) {
             // Synthetic progress confuses Mission Control's view, so let the real release
-            // through and just make it a hard flick in the last direction of movement
+            // through and just make it a quick flick in the last direction of movement
             if (direction != 0.0) {
-                CGEventSetDoubleValueField(event, kCGEventGestureSwipeVelocityX, direction * kSlideReleaseVelocity);
-                CGEventSetDoubleValueField(event, kCGEventGestureSwipeVelocityY, direction * kSlideReleaseVelocity);
+                const double releaseVelocity = direction * iss_mission_control_release_velocity();
+                CGEventSetDoubleValueField(event, kCGEventGestureSwipeVelocityX, releaseVelocity);
+                CGEventSetDoubleValueField(event, kCGEventGestureSwipeVelocityY, releaseVelocity);
             }
             return event;
         }

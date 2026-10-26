@@ -20,7 +20,7 @@ for arg in "$@"; do
   esac
 done
 
-PRODUCT_NAME="InstantSpaceSwitcher"
+PRODUCT_NAME="InstantSpaceSlider"
 BUILD_DIR="build"
 
 if [[ "$CLEAN" == true ]]; then

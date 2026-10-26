@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-PRODUCT_NAME="InstantSpaceSwitcher"
+PRODUCT_NAME="InstantSpaceSlider"
 BUILD_DIR="build"
 APP_BUNDLE="${BUILD_DIR}/${PRODUCT_NAME}.app"
 

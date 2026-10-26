@@ -13,5 +13,5 @@ line_length:
 
 excluded:
   - .build
-  - InstantSpaceSwitcher.app
+  - InstantSpaceSlider.app
   - InstantSpaces_old

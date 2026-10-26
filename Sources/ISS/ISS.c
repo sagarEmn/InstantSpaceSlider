@@ -5,11 +5,15 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CGEventTypes.h>
 #include <assert.h>
+#include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <float.h>
 #include <mach/mach_time.h>
+#include <math.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -75,6 +79,11 @@ static unsigned int syntheticEventsToPassThrough = 0;
 
 // Gesture speed state
 static double gestureSpeed = 2000.0;
+
+// Slide state: switches longer than 0ms post their progress from a serial queue
+static double slideDurationMs = ISS_DEFAULT_SLIDE_DURATION_MS;
+static dispatch_queue_t slideQueue = NULL;
+static atomic_uint pendingSlides = 0;
 
 static ISSSwitchCallback switchCallback = NULL;
 
@@ -569,13 +578,10 @@ static bool iss_post_modern_dock_swipe(CGSGesturePhase phase, ISSDirection direc
     return true;
 }
 
-static bool iss_post_dock_swipe(CGSGesturePhase phase, ISSDirection direction, double velocity) {
-    if (iss_requires_event_augmentation()) {
-        return iss_post_modern_dock_swipe(phase, direction);
-    }
-
+static bool iss_post_legacy_dock_swipe(CGSGesturePhase phase, ISSDirection direction,
+                                       double velocity, double progressMagnitude) {
     const bool isRight = (direction == ISSDirectionRight);
-    const double progress = iss_swipe_progress_for_phase(phase, direction);
+    const double progress = isRight ? progressMagnitude : -progressMagnitude;
 
     // Velocity of gesture based on speed setting
     const double vel = isRight ? velocity : -velocity;
@@ -596,10 +602,74 @@ static bool iss_post_dock_swipe(CGSGesturePhase phase, ISSDirection direction, d
     return true;
 }
 
+static bool iss_post_dock_swipe(CGSGesturePhase phase, ISSDirection direction, double velocity) {
+    if (iss_requires_event_augmentation()) {
+        return iss_post_modern_dock_swipe(phase, direction);
+    }
+    const double progress = iss_swipe_progress_for_phase(phase, direction);
+    return iss_post_legacy_dock_swipe(phase, direction, velocity, fabs(progress));
+}
+
+// Roughly one frame on a 120Hz display
+static const useconds_t kSlideFrameMicroseconds = 8333;
+// Release at instant velocity regardless of the speed setting; a slow release brings back the spring tail
+static const double kSlideReleaseVelocity = 2000.0;
+
+typedef struct {
+    ISSDirection direction;
+    double velocity;
+    double durationMs;
+} ISSSlideRequest;
+
+/** @brief Drags the swipe from 0 to full progress over the request's duration, then releases.
+ *
+ * Releasing a barely-moved swipe at low velocity leaves the Dock to finish with
+ * its spring, whose slow tail delays focus. Arriving at full progress before the
+ * high-velocity release leaves nothing to settle, the same end state as the
+ * instant switch. Runs on slideQueue so the main run loop (and our event tap)
+ * stays free while the frames are posted.
+ */
+static void iss_run_slide(void *context) {
+    ISSSlideRequest *request = context;
+    const unsigned int frames = (unsigned int)fmax(1.0, request->durationMs * 1000.0 / kSlideFrameMicroseconds);
+
+    iss_post_legacy_dock_swipe(kCGSGesturePhaseBegan, request->direction, request->velocity, 0.000016);
+    for (unsigned int i = 1; i <= frames; i++) {
+        usleep(kSlideFrameMicroseconds);
+        iss_post_legacy_dock_swipe(kCGSGesturePhaseChanged, request->direction, request->velocity,
+                                   (double)i / frames);
+    }
+    iss_post_legacy_dock_swipe(kCGSGesturePhaseEnded, request->direction, request->velocity, 1.0);
+
+    free(request);
+    atomic_fetch_sub(&pendingSlides, 1);
+}
+
 static bool iss_perform_switch_gesture(ISSDirection direction, double velocity) {
+    lastGestureTime = CFAbsoluteTimeGetCurrent();
+
+    if (slideDurationMs > 0.0 && !iss_requires_event_augmentation()) {
+        ISSSlideRequest *request = malloc(sizeof(*request));
+        if (!request) {
+            return false;
+        }
+        request->direction = direction;
+        request->velocity = kSlideReleaseVelocity;
+        // Multi-space jumps split the duration so the whole trip takes about one slide
+        request->durationMs = slideDurationMs * gestureSpeed / velocity;
+        // Keep predictions authoritative until the queued slides have finished
+        lastGestureTime += (double)(atomic_load(&pendingSlides) + 1) * request->durationMs / 1000.0;
+
+        if (!slideQueue) {
+            slideQueue = dispatch_queue_create("iss.slide", DISPATCH_QUEUE_SERIAL);
+        }
+        atomic_fetch_add(&pendingSlides, 1);
+        dispatch_async_f(slideQueue, request, iss_run_slide);
+        return true;
+    }
+
     // Send three gesture events--began, changed, and ended
     // If we only send two then mission control doesn't work.
-    lastGestureTime = CFAbsoluteTimeGetCurrent();
     return iss_post_dock_swipe(kCGSGesturePhaseBegan,   direction, velocity)
         && iss_post_dock_swipe(kCGSGesturePhaseChanged, direction, velocity)
         && iss_post_dock_swipe(kCGSGesturePhaseEnded,   direction, velocity);
@@ -841,6 +911,14 @@ void iss_set_swipe_override(bool enabled) {
 
 void iss_set_gesture_speed(double speed) {
     gestureSpeed = speed;
+}
+
+void iss_set_slide_duration(double milliseconds) {
+    slideDurationMs = milliseconds > 0.0 ? milliseconds : 0.0;
+}
+
+bool iss_is_animating(void) {
+    return atomic_load(&pendingSlides) > 0;
 }
 
 void iss_reset_predictions(void) {

@@ -44,6 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       iss_set_gesture_speed(gestureSpeed)
     }
 
+    let slideDuration = UserDefaults.standard.object(forKey: ISS_SLIDE_DURATION_KEY) as? Double ?? ISS_DEFAULT_SLIDE_DURATION_MS
+    iss_set_slide_duration(slideDuration)
+
     if UserDefaults.standard.object(forKey: "overlayDetectionEnabled") as? Bool ?? true {
       iss_set_overlay_detection_enabled(true)
     }

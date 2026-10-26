@@ -5,7 +5,7 @@ let package = Package(
     name: "InstantSpaceSwitcher",
     platforms: [.macOS(.v13)],
     products: [
-        .executable(name: "InstantSpaceSwitcher", targets: ["InstantSpaceSwitcher"]),
+        .executable(name: "InstantSpaceSlider", targets: ["InstantSpaceSwitcher"]),
         .executable(name: "ISSCli", targets: ["ISSCli"])
     ],
     targets: [

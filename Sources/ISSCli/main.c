@@ -5,8 +5,27 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <string.h>
 
+// Defaults domain of the app bundle, so the CLI follows the settings slider
+#define ISS_APP_BUNDLE_ID "com.sagarEmn.InstantSpaceSlider"
+
 static void print_usage(const char *progName) {
-    fprintf(stderr, "Usage: %s [left|right|index <n>]\n", progName);
+    fprintf(stderr, "Usage: %s [--duration <ms>] [left|right|index <n>]\n", progName);
+}
+
+static double load_saved_slide_duration(void) {
+    double duration = ISS_DEFAULT_SLIDE_DURATION_MS;
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR(ISS_SLIDE_DURATION_KEY),
+                                                        CFSTR(ISS_APP_BUNDLE_ID));
+    if (value) {
+        if (CFGetTypeID(value) == CFNumberGetTypeID()) {
+            double saved = 0.0;
+            if (CFNumberGetValue((CFNumberRef)value, kCFNumberDoubleType, &saved) && saved >= 0.0) {
+                duration = saved;
+            }
+        }
+        CFRelease(value);
+    }
+    return duration;
 }
 
 int main(int argc, char **argv) {
@@ -14,6 +33,22 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Failed to initialize ISS (event tap). Check accessibility and input monitoring permissions.\n");
         return 1;
     }
+
+    double duration = load_saved_slide_duration();
+    if (argc > 2 && (!strcmp(argv[1], "--duration") || !strcmp(argv[1], "-d"))) {
+        char *endPtr = NULL;
+        duration = strtod(argv[2], &endPtr);
+        if (endPtr == argv[2] || duration < 0.0) {
+            fprintf(stderr, "Duration must be a number of milliseconds (0 for instant).\n");
+            iss_destroy();
+            return 1;
+        }
+        // Drop the flag but keep the program name in argv[0]
+        argv[2] = argv[0];
+        argc -= 2;
+        argv += 2;
+    }
+    iss_set_slide_duration(duration);
 
     ISSDirection direction = ISSDirectionLeft;
     bool useIndex = false;
@@ -59,6 +94,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // Slides are posted in the background; keep the run loop (and event tap) alive until they finish
+    while (iss_is_animating()) {
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+    }
     CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.3, false);
     iss_destroy();
     return 0;

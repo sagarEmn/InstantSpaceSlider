@@ -13,16 +13,16 @@ final class GeneralSettingsViewController: NSViewController {
     checkboxWithTitle: "Show on-screen display in Mission Control", target: nil, action: nil)
   private let swipeOverrideCheckbox = NSButton(
     checkboxWithTitle: "Override swipe gesture", target: nil, action: nil)
-  private let animationSpeedPopup = NSPopUpButton()
-  private let animationSpeedLabel = NSTextField(labelWithString: "Animation Speed:")
+  private let animationSpeedSlider = NSSlider()
+  private let animationSpeedValueLabel = NSTextField(labelWithString: "")
   private let launchAtLoginCheckbox = NSButton(
     checkboxWithTitle: "Launch at login", target: nil, action: nil)
   private let hideMenuBarIconCheckbox = NSButton(
     checkboxWithTitle: "Hide menu bar icon", target: nil, action: nil)
 
   private let durationPresets = [100, 200, 300, 500, 750, 1000]
-  private let animationSpeedOptions = ["Normal", "Fast", "Faster", "Fastest", "Instant"]
-  private let animationSpeedValues: [Double] = [40.0, 50.0, 60.0, 80.0, 2000.0]
+  // Slides shorter than this snap to instant (no animation)
+  private let instantSnapMs = 10.0
 
   private let defaults = UserDefaults.standard
 
@@ -53,8 +53,12 @@ final class GeneralSettingsViewController: NSViewController {
     showOSDInMissionControlCheckbox.action = #selector(showOSDInMissionControlChanged)
     swipeOverrideCheckbox.target = self
     swipeOverrideCheckbox.action = #selector(swipeOverrideChanged)
-    animationSpeedPopup.target = self
-    animationSpeedPopup.action = #selector(animationSpeedChanged)
+    animationSpeedSlider.target = self
+    animationSpeedSlider.action = #selector(animationSpeedChanged)
+    animationSpeedSlider.isContinuous = true
+    // Slider runs slow-to-fast, so its value is the time saved off the longest slide
+    animationSpeedSlider.minValue = 0
+    animationSpeedSlider.maxValue = ISS_MAX_SLIDE_DURATION_MS
     launchAtLoginCheckbox.target = self
     launchAtLoginCheckbox.action = #selector(launchAtLoginChanged)
     hideMenuBarIconCheckbox.target = self
@@ -62,7 +66,6 @@ final class GeneralSettingsViewController: NSViewController {
 
     // Populate data
     for duration in durationPresets { osdDurationPopup.addItem(withTitle: "\(duration)ms") }
-    for speed in animationSpeedOptions { animationSpeedPopup.addItem(withTitle: speed) }
 
     // System
     let systemLabel = NSTextField(labelWithString: "System:")
@@ -85,7 +88,17 @@ final class GeneralSettingsViewController: NSViewController {
 
     // Animation Speed
     let animationLabel = NSTextField(labelWithString: "Animation Speed:")
-    formView.addRow(label: animationLabel, control: animationSpeedPopup)
+    animationSpeedSlider.widthAnchor.constraint(equalToConstant: 200).isActive = true
+    animationSpeedValueLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+
+    let animationContainer = NSStackView()
+    animationContainer.orientation = .horizontal
+    animationContainer.spacing = 8
+    animationContainer.addArrangedSubview(NSTextField(labelWithString: "Slower"))
+    animationContainer.addArrangedSubview(animationSpeedSlider)
+    animationContainer.addArrangedSubview(NSTextField(labelWithString: "Instant"))
+    animationContainer.addArrangedSubview(animationSpeedValueLabel)
+    formView.addRow(label: animationLabel, control: animationContainer)
     formView.addSectionSpacing()
 
     // OSD
@@ -124,16 +137,10 @@ final class GeneralSettingsViewController: NSViewController {
     hideMenuBarIconCheckbox.state = defaults.bool(forKey: "hideMenuBarIcon") ? .on : .off
     swipeOverrideCheckbox.state = defaults.bool(forKey: "swipeOverride") ? .on : .off
 
-    let animationSpeedValue = defaults.double(forKey: "gestureSpeed")
-    if animationSpeedValue > 0 {
-      if let index = animationSpeedValues.firstIndex(where: { $0 == animationSpeedValue }) {
-        animationSpeedPopup.selectItem(at: index)
-      } else {
-        animationSpeedPopup.selectItem(at: 4)
-      }
-    } else {
-      animationSpeedPopup.selectItem(at: 4)
-    }
+    let savedDuration = defaults.object(forKey: ISS_SLIDE_DURATION_KEY) as? Double ?? ISS_DEFAULT_SLIDE_DURATION_MS
+    let slideDuration = min(max(savedDuration, 0), ISS_MAX_SLIDE_DURATION_MS)
+    animationSpeedSlider.doubleValue = ISS_MAX_SLIDE_DURATION_MS - slideDuration
+    updateAnimationSpeedLabel(slideDuration)
 
     launchAtLoginCheckbox.state = SMAppService.mainApp.status == .enabled ? .on : .off
   }
@@ -171,19 +178,17 @@ final class GeneralSettingsViewController: NSViewController {
     iss_set_swipe_override(isEnabled)
   }
 
-  @objc private func animationSpeedChanged(_ sender: NSPopUpButton) {
-    let index = sender.indexOfSelectedItem
-    guard index >= 0 && index < animationSpeedOptions.count else { return }
+  @objc private func animationSpeedChanged(_ sender: NSSlider) {
+    var slideDuration = (ISS_MAX_SLIDE_DURATION_MS - sender.doubleValue).rounded()
+    if slideDuration < instantSnapMs { slideDuration = 0 }
 
-    var velocity: Double
-    if index < animationSpeedValues.count {
-      velocity = animationSpeedValues[index]
-    } else {
-      velocity = 2000.0
-    }
+    updateAnimationSpeedLabel(slideDuration)
+    defaults.set(slideDuration, forKey: ISS_SLIDE_DURATION_KEY)
+    iss_set_slide_duration(slideDuration)
+  }
 
-    defaults.set(velocity, forKey: "gestureSpeed")
-    iss_set_gesture_speed(velocity)
+  private func updateAnimationSpeedLabel(_ slideDuration: Double) {
+    animationSpeedValueLabel.stringValue = slideDuration == 0 ? "(instant)" : "(\(Int(slideDuration)) ms)"
   }
 
   @objc private func hideMenuBarIconChanged(_ sender: NSButton) {

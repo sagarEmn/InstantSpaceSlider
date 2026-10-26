@@ -32,9 +32,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: nightly
-          name: "InstantSpaceSwitcher Nightly"
+          name: "InstantSpaceSlider Nightly"
           prerelease: true
           body: |
             Latest automatic build from the main branch. Might be broken.
           files: |
-            build/InstantSpaceSwitcher-*.dmg
+            build/InstantSpaceSlider-*.dmg

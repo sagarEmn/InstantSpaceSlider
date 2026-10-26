@@ -118,4 +118,29 @@ void iss_set_overlay_detection_enabled(bool enabled);
  */
 void iss_set_gesture_speed(double speed);
 
+/** @brief Default length of the visible slide, in milliseconds. */
+#define ISS_DEFAULT_SLIDE_DURATION_MS 120.0
+
+/** @brief Longest slide the settings allow, in milliseconds. */
+#define ISS_MAX_SLIDE_DURATION_MS 300.0
+
+/** @brief Preferences key (in the app's defaults domain) holding the slide duration. */
+#define ISS_SLIDE_DURATION_KEY "slideDurationMs"
+
+/**
+ * @brief Sets how long each space switch slides for.
+ *
+ * The slide is driven by posting swipe progress from 0 to 1 over this time and
+ * then releasing at full velocity, so the Dock has no spring tail left to play
+ * and focus moves as soon as the slide ends. Ignored on macOS 27+.
+ * @param milliseconds Slide length; 0 switches instantly with no animation.
+ */
+void iss_set_slide_duration(double milliseconds);
+
+/**
+ * @brief Returns true while animated switches are still being posted.
+ * Short-lived callers (e.g. the CLI) should keep their run loop alive until this is false.
+ */
+bool iss_is_animating(void);
+
 #endif /* _ISS_H */

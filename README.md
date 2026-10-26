@@ -1,6 +1,8 @@
-# InstantSpaceSwitcher
+# InstantSpaceSlider
 
-Native instant workspace switching on macOS. No more waiting for animations.
+Fast workspace switching on macOS: plays the native slide animation at an adjustable speed (or skips it entirely), so you can still see which way you moved.
+
+Forked from [jurplel/InstantSpaceSwitcher](https://github.com/jurplel/InstantSpaceSwitcher), the original project, by jurplel (MIT license).
 
 https://github.com/user-attachments/assets/037422c9-3fb7-41cd-8da7-58d28c4c8eff
 
@@ -9,39 +11,31 @@ https://github.com/user-attachments/assets/037422c9-3fb7-41cd-8da7-58d28c4c8eff
 - Does not require disabling SIP
 - Uses native macOS spaces
 - Free
+- Adjustable slide length (Settings > Animation Speed), from a visible slide to instant, with focus landing as soon as the slide ends
 
-A simple CLI is provided (`InstantSpaceSwitcher.app/Contents/MacOS/ISSCli --help`)
+A simple CLI is provided (`InstantSpaceSlider.app/Contents/MacOS/ISSCli --help`). It uses the speed set in the app; pass `--duration <ms>` to override it (e.g. `ISSCli --duration 0 right` for instant).
 
 
 ## Installation
 
-### Homebrew
-
-```sh
-brew install --cask jurplel/tap/instant-space-switcher
-```
-
-After installation the app is located inside `/Applications/InstantSpaceSwitcher.app`
-
-
 ### Downloads
 
-Pre-built binaries are available through Github Releases [here](https://github.com/jurplel/InstantSpaceSwitcher/tags).
+Pre-built binaries are available through Github Releases [here](https://github.com/sagarEmn/InstantSpaceSlider/tags).
 
 ### Build from source
 
 ```sh
-git clone https://github.com/jurplel/InstantSpaceSwitcher
-cd InstantSpaceSwitcher
+git clone https://github.com/sagarEmn/InstantSpaceSlider
+cd InstantSpaceSlider
 ./dist/build.sh
-open ./build/InstantSpaceSwitcher.app
+open ./build/InstantSpaceSlider.app
 ```
 
 ### Troubleshooting / First time startup
 
 1. When opening the app the first time you are likely to run into any of the following warnings:
 
-> "Apple could not verify InstantSpaceSwitcher.app is free of malware"
+> "Apple could not verify InstantSpaceSlider.app is free of malware"
 
 > "App is damaged and can’t be opened"
 
@@ -49,7 +43,7 @@ open ./build/InstantSpaceSwitcher.app
 
 Please follow the instructions [here](https://wiki.hacks.guide/wiki/Open_unsigned_applications_on_macOS_Sequoia_and_newer) for instructions on how to allow the app to run[^1].
 
-2. Afterward you will get a warning that InstantSpaceSwitcher wants to use accessibility features. You have to allow this.
+2. Afterward you will get a warning that InstantSpaceSlider wants to use accessibility features. You have to allow this.
 
 3. Then open the app from the Applications folder and the configuration window should appear.
 

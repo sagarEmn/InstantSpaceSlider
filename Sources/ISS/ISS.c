@@ -102,6 +102,12 @@ static const double kMissionControlOpenSign = 1.0;
 // wait for this much progress before deciding the direction
 static const double kVerticalDirectionThreshold = 0.03;
 
+// The trackpad streams vertical and horizontal swipes side by side and cancels
+// the loser on release, so a sideways swipe carries vertical drift. Only act
+// before release on a clearly vertical swipe with no horizontal one running.
+static const double kVerticalEarlyCommit = 0.15;
+static bool horizontalActive = false;
+
 // Our macOS 27 swipes re-enter the tap with sourcePid == 0, so count them out instead
 static unsigned int syntheticEventsToPassThrough = 0;
 
@@ -207,7 +213,7 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
 
     switch (phase) {
     case kCGSGesturePhaseBegan:
-        followTracking = !iss_is_expose_active();
+        followTracking = !iss_is_expose_active() && !iss_is_mission_control_active();
         followLastProgress = progress;
         followLastDirection = progress > 0.0 ? 1.0 : (progress < 0.0 ? -1.0 : 0.0);
         return event;
@@ -258,8 +264,10 @@ static CGEventRef vertical_swipe_override(CGEventRef event) {
             if (phase == kCGSGesturePhaseEnded && fabs(value) < kVerticalDirectionThreshold) {
                 value = CGEventGetDoubleValueField(event, kCGEventGestureSwipeVelocityY);
             }
-            const bool decided = phase == kCGSGesturePhaseEnded ? value != 0.0
-                                                               : fabs(value) >= kVerticalDirectionThreshold;
+            // Ended means the vertical swipe won; before that, only a clear one counts
+            const bool decided = phase == kCGSGesturePhaseEnded
+                ? value != 0.0
+                : !horizontalActive && fabs(value) >= kVerticalEarlyCommit;
             if (decided) {
                 verticalFired = true;
                 // Negative (swipe up) opens Mission Control
@@ -343,6 +351,14 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
         uint16_t motion =
             (uint16_t)CGEventGetIntegerValueField(event, kCGEventGestureSwipeMotion);
+        if (motion == kCGGestureMotionHorizontal) {
+            CGSGesturePhase horizontalPhase =
+                (CGSGesturePhase)CGEventGetIntegerValueField(event, kCGEventGesturePhase);
+            if (horizontalPhase == kCGSGesturePhaseBegan) horizontalActive = true;
+            if (horizontalPhase == kCGSGesturePhaseEnded || horizontalPhase == kCGSGesturePhaseCancelled) {
+                horizontalActive = false;
+            }
+        }
         if (motion == kCGGestureMotionVertical && missionControlOverride) {
             return vertical_swipe_override(event);
         }
@@ -356,7 +372,8 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
         switch (phase) {
         case kCGSGesturePhaseBegan:
-            if (iss_is_expose_active()) return event;
+            // Leave swipes inside Mission Control / App Exposé to the Dock
+            if (iss_is_expose_active() || iss_is_mission_control_active()) return event;
             swipeTracking = true;
             swipeFired = false;
             return NULL;

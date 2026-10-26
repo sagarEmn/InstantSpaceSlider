@@ -13,6 +13,8 @@ final class GeneralSettingsViewController: NSViewController {
     checkboxWithTitle: "Show on-screen display in Mission Control", target: nil, action: nil)
   private let swipeOverrideCheckbox = NSButton(
     checkboxWithTitle: "Override swipe gesture", target: nil, action: nil)
+  private let missionControlOverrideCheckbox = NSButton(
+    checkboxWithTitle: "Speed up Mission Control (swipe up / F3)", target: nil, action: nil)
   private let animationSpeedSlider = NSSlider()
   private let animationSpeedValueLabel = NSTextField(labelWithString: "")
   private let launchAtLoginCheckbox = NSButton(
@@ -53,6 +55,8 @@ final class GeneralSettingsViewController: NSViewController {
     showOSDInMissionControlCheckbox.action = #selector(showOSDInMissionControlChanged)
     swipeOverrideCheckbox.target = self
     swipeOverrideCheckbox.action = #selector(swipeOverrideChanged)
+    missionControlOverrideCheckbox.target = self
+    missionControlOverrideCheckbox.action = #selector(missionControlOverrideChanged)
     animationSpeedSlider.target = self
     animationSpeedSlider.action = #selector(animationSpeedChanged)
     animationSpeedSlider.isContinuous = true
@@ -72,6 +76,7 @@ final class GeneralSettingsViewController: NSViewController {
     formView.addRow(label: systemLabel, control: launchAtLoginCheckbox)
     formView.addRow(label: nil, control: hideMenuBarIconCheckbox)
     formView.addRow(label: nil, control: swipeOverrideCheckbox)
+    formView.addRow(label: nil, control: missionControlOverrideCheckbox)
 
     let experimentalTitle = NSMutableAttributedString(string: "Enable Mission Control/Exposé detection\n")
     let sublabel = NSAttributedString(
@@ -136,6 +141,7 @@ final class GeneralSettingsViewController: NSViewController {
 
     hideMenuBarIconCheckbox.state = defaults.bool(forKey: "hideMenuBarIcon") ? .on : .off
     swipeOverrideCheckbox.state = defaults.bool(forKey: "swipeOverride") ? .on : .off
+    missionControlOverrideCheckbox.state = defaults.bool(forKey: "missionControlOverride") ? .on : .off
 
     let savedDuration = defaults.object(forKey: ISS_SLIDE_DURATION_KEY) as? Double ?? ISS_DEFAULT_SLIDE_DURATION_MS
     let slideDuration = min(max(savedDuration, 0), ISS_MAX_SLIDE_DURATION_MS)
@@ -176,6 +182,12 @@ final class GeneralSettingsViewController: NSViewController {
     let isEnabled = sender.state == .on
     defaults.set(isEnabled, forKey: "swipeOverride")
     iss_set_swipe_override(isEnabled)
+  }
+
+  @objc private func missionControlOverrideChanged(_ sender: NSButton) {
+    let isEnabled = sender.state == .on
+    defaults.set(isEnabled, forKey: "missionControlOverride")
+    iss_set_mission_control_override(isEnabled)
   }
 
   @objc private func animationSpeedChanged(_ sender: NSSlider) {

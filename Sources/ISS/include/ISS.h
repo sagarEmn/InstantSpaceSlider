@@ -138,6 +138,16 @@ void iss_set_gesture_speed(double speed);
 void iss_set_slide_duration(double milliseconds);
 
 /**
+ * @brief Enables or disables the fast Mission Control override.
+ *
+ * When enabled, vertical three/four-finger swipes and the Mission Control (F3)
+ * key are replaced with a slide of the configured duration, skipping the Dock's
+ * slow spring finish. Has no effect on macOS 27+.
+ * @param enabled true to intercept, false to pass them through normally.
+ */
+void iss_set_mission_control_override(bool enabled);
+
+/**
  * @brief Returns true while animated switches are still being posted.
  * Short-lived callers (e.g. the CLI) should keep their run loop alive until this is false.
  */

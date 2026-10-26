@@ -39,6 +39,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       iss_set_swipe_override(true)
     }
 
+    if UserDefaults.standard.bool(forKey: "missionControlOverride") {
+      iss_set_mission_control_override(true)
+    }
+
     let gestureSpeed = UserDefaults.standard.double(forKey: "gestureSpeed")
     if gestureSpeed > 0 {
       iss_set_gesture_speed(gestureSpeed)

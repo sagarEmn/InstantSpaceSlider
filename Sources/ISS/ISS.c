@@ -53,6 +53,7 @@ typedef CF_ENUM(uint8_t, CGSGesturePhase) {
 // Limited subset of motion constants observed in synthetic Dock swipe traces.
 typedef CF_ENUM(uint16_t, CGGestureMotion) {
     kCGGestureMotionHorizontal = 1,
+    kCGGestureMotionVertical = 2,
 };
 
 typedef int32_t CGSConnectionID;
@@ -73,6 +74,22 @@ static bool overlayDetectionEnabled = false;
 static bool swipeOverrideEnabled = false;
 static bool swipeTracking = false;
 static bool swipeFired = false;
+
+// Mission Control override state (vertical swipes and the Mission Control key)
+static bool missionControlOverrideEnabled = false;
+static bool verticalTracking = false;
+static bool verticalFired = false;
+
+// Key code the Mission Control (F3) key reports on Apple keyboards
+static const int64_t kMissionControlKeyCode = 160;
+
+// Synthetic progress sign that opens Mission Control. The trackpad reports a
+// swipe up as negative progress, but the Dock reads our posted sign the other way.
+static const double kMissionControlOpenSign = 1.0;
+
+// Real vertical swipes start with a small wobble (often the wrong sign), so
+// wait for this much progress before deciding the direction
+static const double kVerticalDirectionThreshold = 0.03;
 
 // Our macOS 27 swipes re-enter the tap with sourcePid == 0, so count them out instead
 static unsigned int syntheticEventsToPassThrough = 0;
@@ -167,6 +184,54 @@ static void swipe_override_switch(ISSDirection dir) {
     }
 }
 
+static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durationMs);
+
+// Replace a real vertical (Mission Control / App Exposé) swipe with a fast slide
+// in the same direction, so the Dock has no spring tail left to play.
+static CGEventRef vertical_swipe_override(CGEventRef event) {
+    CGSGesturePhase phase =
+        (CGSGesturePhase)CGEventGetIntegerValueField(event, kCGEventGesturePhase);
+
+    switch (phase) {
+    case kCGSGesturePhaseBegan:
+        verticalTracking = true;
+        verticalFired = false;
+        return NULL;
+
+    case kCGSGesturePhaseChanged:
+    case kCGSGesturePhaseEnded: {
+        if (!verticalTracking) return event;
+        if (!verticalFired) {
+            double value = CGEventGetDoubleValueField(event, kCGEventGestureSwipeProgress);
+            if (phase == kCGSGesturePhaseEnded && fabs(value) < kVerticalDirectionThreshold) {
+                value = CGEventGetDoubleValueField(event, kCGEventGestureSwipeVelocityY);
+            }
+            const bool decided = phase == kCGSGesturePhaseEnded ? value != 0.0
+                                                               : fabs(value) >= kVerticalDirectionThreshold;
+            if (decided) {
+                verticalFired = true;
+                // Negative (swipe up) opens Mission Control
+                const double sign = value < 0.0 ? kMissionControlOpenSign : -kMissionControlOpenSign;
+                iss_enqueue_slide(kCGGestureMotionVertical, sign, slideDurationMs);
+            }
+        }
+        if (phase == kCGSGesturePhaseEnded) {
+            verticalTracking = false;
+            verticalFired = false;
+        }
+        return NULL;
+    }
+
+    case kCGSGesturePhaseCancelled:
+        verticalTracking = false;
+        verticalFired = false;
+        return NULL;
+
+    default:
+        return verticalTracking ? NULL : event;
+    }
+}
+
 static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
                                    CGEventRef event, void *refcon) {
     (void)proxy;
@@ -195,7 +260,22 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
         return event;
     }
 
-    if (!swipeOverrideEnabled) return event;
+    // Mission Control override relies on the legacy (macOS 13-26) event format
+    const bool missionControlOverride = missionControlOverrideEnabled && !iss_requires_event_augmentation();
+    if (!swipeOverrideEnabled && !missionControlOverride) return event;
+
+    if (type == kCGEventKeyDown || type == kCGEventKeyUp) {
+        if (!missionControlOverride ||
+            CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) != kMissionControlKeyCode) {
+            return event;
+        }
+        if (type == kCGEventKeyDown && !CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat)) {
+            // Without a real swipe to copy, close if Mission Control looks open, otherwise open
+            const double sign = iss_is_mission_control_active() ? -kMissionControlOpenSign : kMissionControlOpenSign;
+            iss_enqueue_slide(kCGGestureMotionVertical, sign, slideDurationMs);
+        }
+        return NULL;
+    }
 
     // Pass through synthetic events (non-HID source). Real gesture events
     // from the trackpad have sourcePid == 0 (HID kernel).
@@ -211,7 +291,10 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
         uint16_t motion =
             (uint16_t)CGEventGetIntegerValueField(event, kCGEventGestureSwipeMotion);
-        if (motion != kCGGestureMotionHorizontal) return event;
+        if (motion == kCGGestureMotionVertical && missionControlOverride) {
+            return vertical_swipe_override(event);
+        }
+        if (motion != kCGGestureMotionHorizontal || !swipeOverrideEnabled) return event;
 
         CGSGesturePhase phase =
             (CGSGesturePhase)CGEventGetIntegerValueField(event, kCGEventGesturePhase);
@@ -272,7 +355,7 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
     }
 
     // Suppress companion gesture events during active swipe tracking
-    if (eventType == kCGSEventGesture && swipeTracking) {
+    if (eventType == kCGSEventGesture && (swipeTracking || verticalTracking)) {
         return NULL;
     }
 
@@ -578,13 +661,12 @@ static bool iss_post_modern_dock_swipe(CGSGesturePhase phase, ISSDirection direc
     return true;
 }
 
-static bool iss_post_legacy_dock_swipe(CGSGesturePhase phase, ISSDirection direction,
+static bool iss_post_legacy_dock_swipe(CGSGesturePhase phase, CGGestureMotion motion, double sign,
                                        double velocity, double progressMagnitude) {
-    const bool isRight = (direction == ISSDirectionRight);
-    const double progress = isRight ? progressMagnitude : -progressMagnitude;
+    const double progress = sign * progressMagnitude;
 
     // Velocity of gesture based on speed setting
-    const double vel = isRight ? velocity : -velocity;
+    const double vel = sign * velocity;
 
     CGEventRef ev = CGEventCreate(NULL);
     if (!ev) {
@@ -594,7 +676,7 @@ static bool iss_post_legacy_dock_swipe(CGSGesturePhase phase, ISSDirection direc
     CGEventSetIntegerValueField(ev, kCGEventGestureHIDType, kIOHIDEventTypeDockSwipe);
     CGEventSetIntegerValueField(ev, kCGEventGesturePhase, phase);
     CGEventSetDoubleValueField(ev, kCGEventGestureSwipeProgress, progress);
-    CGEventSetIntegerValueField(ev, kCGEventGestureSwipeMotion, kCGGestureMotionHorizontal);
+    CGEventSetIntegerValueField(ev, kCGEventGestureSwipeMotion, motion);
     CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityX, vel);
     CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityY, vel);
     CGEventPost(kCGSessionEventTap, ev);
@@ -607,7 +689,8 @@ static bool iss_post_dock_swipe(CGSGesturePhase phase, ISSDirection direction, d
         return iss_post_modern_dock_swipe(phase, direction);
     }
     const double progress = iss_swipe_progress_for_phase(phase, direction);
-    return iss_post_legacy_dock_swipe(phase, direction, velocity, fabs(progress));
+    return iss_post_legacy_dock_swipe(phase, kCGGestureMotionHorizontal, progress > 0.0 ? 1.0 : -1.0,
+                                      velocity, fabs(progress));
 }
 
 // Roughly one frame on a 120Hz display
@@ -616,8 +699,8 @@ static const useconds_t kSlideFrameMicroseconds = 8333;
 static const double kSlideReleaseVelocity = 2000.0;
 
 typedef struct {
-    ISSDirection direction;
-    double velocity;
+    CGGestureMotion motion;
+    double sign;
     double durationMs;
 } ISSSlideRequest;
 
@@ -633,39 +716,47 @@ static void iss_run_slide(void *context) {
     ISSSlideRequest *request = context;
     const unsigned int frames = (unsigned int)fmax(1.0, request->durationMs * 1000.0 / kSlideFrameMicroseconds);
 
-    iss_post_legacy_dock_swipe(kCGSGesturePhaseBegan, request->direction, request->velocity, 0.000016);
+    iss_post_legacy_dock_swipe(kCGSGesturePhaseBegan, request->motion, request->sign,
+                               kSlideReleaseVelocity, 0.000016);
     for (unsigned int i = 1; i <= frames; i++) {
         usleep(kSlideFrameMicroseconds);
-        iss_post_legacy_dock_swipe(kCGSGesturePhaseChanged, request->direction, request->velocity,
-                                   (double)i / frames);
+        iss_post_legacy_dock_swipe(kCGSGesturePhaseChanged, request->motion, request->sign,
+                                   kSlideReleaseVelocity, (double)i / frames);
     }
-    iss_post_legacy_dock_swipe(kCGSGesturePhaseEnded, request->direction, request->velocity, 1.0);
+    iss_post_legacy_dock_swipe(kCGSGesturePhaseEnded, request->motion, request->sign,
+                               kSlideReleaseVelocity, 1.0);
 
     free(request);
     atomic_fetch_sub(&pendingSlides, 1);
+}
+
+static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durationMs) {
+    ISSSlideRequest *request = malloc(sizeof(*request));
+    if (!request) {
+        return false;
+    }
+    request->motion = motion;
+    request->sign = sign;
+    request->durationMs = durationMs;
+
+    if (!slideQueue) {
+        slideQueue = dispatch_queue_create("iss.slide", DISPATCH_QUEUE_SERIAL);
+    }
+    atomic_fetch_add(&pendingSlides, 1);
+    dispatch_async_f(slideQueue, request, iss_run_slide);
+    return true;
 }
 
 static bool iss_perform_switch_gesture(ISSDirection direction, double velocity) {
     lastGestureTime = CFAbsoluteTimeGetCurrent();
 
     if (slideDurationMs > 0.0 && !iss_requires_event_augmentation()) {
-        ISSSlideRequest *request = malloc(sizeof(*request));
-        if (!request) {
-            return false;
-        }
-        request->direction = direction;
-        request->velocity = kSlideReleaseVelocity;
         // Multi-space jumps split the duration so the whole trip takes about one slide
-        request->durationMs = slideDurationMs * gestureSpeed / velocity;
+        const double durationMs = slideDurationMs * gestureSpeed / velocity;
         // Keep predictions authoritative until the queued slides have finished
-        lastGestureTime += (double)(atomic_load(&pendingSlides) + 1) * request->durationMs / 1000.0;
-
-        if (!slideQueue) {
-            slideQueue = dispatch_queue_create("iss.slide", DISPATCH_QUEUE_SERIAL);
-        }
-        atomic_fetch_add(&pendingSlides, 1);
-        dispatch_async_f(slideQueue, request, iss_run_slide);
-        return true;
+        lastGestureTime += (double)(atomic_load(&pendingSlides) + 1) * durationMs / 1000.0;
+        return iss_enqueue_slide(kCGGestureMotionHorizontal, direction == ISSDirectionRight ? 1.0 : -1.0,
+                                 durationMs);
     }
 
     // Send three gesture events--began, changed, and ended
@@ -911,6 +1002,14 @@ void iss_set_swipe_override(bool enabled) {
 
 void iss_set_gesture_speed(double speed) {
     gestureSpeed = speed;
+}
+
+void iss_set_mission_control_override(bool enabled) {
+    missionControlOverrideEnabled = enabled;
+    if (!enabled) {
+        verticalTracking = false;
+        verticalFired = false;
+    }
 }
 
 void iss_set_slide_duration(double milliseconds) {

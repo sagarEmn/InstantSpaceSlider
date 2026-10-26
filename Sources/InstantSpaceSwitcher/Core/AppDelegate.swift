@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if UserDefaults.standard.bool(forKey: "swipeOverride") {
       iss_set_swipe_override(true)
     }
+    iss_set_swipe_follow_fingers(UserDefaults.standard.bool(forKey: "swipeFollowFingers"))
 
     if UserDefaults.standard.bool(forKey: "missionControlOverride") {
       iss_set_mission_control_override(true)

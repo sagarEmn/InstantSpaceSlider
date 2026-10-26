@@ -12,6 +12,7 @@ https://github.com/user-attachments/assets/037422c9-3fb7-41cd-8da7-58d28c4c8eff
 - Uses native macOS spaces
 - Free
 - Adjustable slide length (Settings > Animation Speed), from a visible slide to instant, with focus landing as soon as the slide ends
+- Trackpad swipe modes: instant, or follow your fingers (drag partway, back and forth) and snap quickly on release
 - Optional fast Mission Control: swipe up / F3 open and close it with the same short slide (Settings > Speed up Mission Control)
 
 A simple CLI is provided (`InstantSpaceSlider.app/Contents/MacOS/ISSCli --help`). It uses the speed set in the app; pass `--duration <ms>` to override it (e.g. `ISSCli --duration 0 right` for instant).

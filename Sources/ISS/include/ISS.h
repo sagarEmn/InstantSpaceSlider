@@ -138,6 +138,17 @@ void iss_set_gesture_speed(double speed);
 void iss_set_slide_duration(double milliseconds);
 
 /**
+ * @brief Chooses how the swipe override handles horizontal trackpad swipes.
+ *
+ * Off (default): any swipe switches instantly in its starting direction.
+ * On: the space follows the fingers natively (drag partway, back and forth);
+ * on release it slides quickly toward the last direction of movement, either
+ * to the neighbouring space or back to the current one. Has no effect on macOS 27+.
+ * @param enabled true to follow the fingers, false for instant swipes.
+ */
+void iss_set_swipe_follow_fingers(bool enabled);
+
+/**
  * @brief Enables or disables the fast Mission Control override.
  *
  * When enabled, vertical three/four-finger swipes and the Mission Control (F3)

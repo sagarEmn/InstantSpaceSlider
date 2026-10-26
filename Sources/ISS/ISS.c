@@ -75,6 +75,17 @@ static bool swipeOverrideEnabled = false;
 static bool swipeTracking = false;
 static bool swipeFired = false;
 
+// Follow-fingers swipe mode: the Dock tracks the real swipe, we only finish it
+static bool followFingersEnabled = false;
+static bool followTracking = false;
+static double followLastProgress = 0.0;
+static double followLastDirection = 0.0;
+
+// Progress changes smaller than this are finger jitter, not a change of direction
+static const double kFollowDirectionJitter = 0.002;
+// A release at least this fast says which way the fingers were last moving
+static const double kFollowReleaseVelocity = 0.5;
+
 // Mission Control override state (vertical swipes and the Mission Control key)
 static bool missionControlOverrideEnabled = false;
 static bool verticalTracking = false;
@@ -185,6 +196,47 @@ static void swipe_override_switch(ISSDirection dir) {
 }
 
 static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durationMs);
+static void iss_finish_followed_swipe(double progress, double lastDirection);
+
+// Let a real horizontal swipe through so the space follows the fingers, then
+// replace its release with a fast finish toward the last direction of movement.
+static CGEventRef follow_fingers_swipe(CGEventRef event) {
+    CGSGesturePhase phase =
+        (CGSGesturePhase)CGEventGetIntegerValueField(event, kCGEventGesturePhase);
+    double progress = CGEventGetDoubleValueField(event, kCGEventGestureSwipeProgress);
+
+    switch (phase) {
+    case kCGSGesturePhaseBegan:
+        followTracking = !iss_is_expose_active();
+        followLastProgress = progress;
+        followLastDirection = progress > 0.0 ? 1.0 : (progress < 0.0 ? -1.0 : 0.0);
+        return event;
+
+    case kCGSGesturePhaseChanged:
+        if (followTracking && fabs(progress - followLastProgress) >= kFollowDirectionJitter) {
+            followLastDirection = progress > followLastProgress ? 1.0 : -1.0;
+            followLastProgress = progress;
+        }
+        return event;
+
+    case kCGSGesturePhaseEnded: {
+        if (!followTracking) return event;
+        followTracking = false;
+        double velocity = CGEventGetDoubleValueField(event, kCGEventGestureSwipeVelocityX);
+        double direction = fabs(velocity) >= kFollowReleaseVelocity ? (velocity > 0.0 ? 1.0 : -1.0)
+                                                                    : followLastDirection;
+        iss_finish_followed_swipe(progress, direction);
+        return NULL;
+    }
+
+    case kCGSGesturePhaseCancelled:
+        followTracking = false;
+        return event;
+
+    default:
+        return event;
+    }
+}
 
 // Replace a real vertical (Mission Control / App Exposé) swipe with a fast slide
 // in the same direction, so the Dock has no spring tail left to play.
@@ -295,6 +347,9 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
             return vertical_swipe_override(event);
         }
         if (motion != kCGGestureMotionHorizontal || !swipeOverrideEnabled) return event;
+        if (followFingersEnabled && !iss_requires_event_augmentation()) {
+            return follow_fingers_swipe(event);
+        }
 
         CGSGesturePhase phase =
             (CGSGesturePhase)CGEventGetIntegerValueField(event, kCGEventGesturePhase);
@@ -698,13 +753,19 @@ static const useconds_t kSlideFrameMicroseconds = 8333;
 // Release at instant velocity regardless of the speed setting; a slow release brings back the spring tail
 static const double kSlideReleaseVelocity = 2000.0;
 
+// Smallest non-zero progress; keeps the direction without visible travel
+static const double kMinimalProgress = 0.000016;
+
 typedef struct {
     CGGestureMotion motion;
-    double sign;
+    bool postBegan;   // false when continuing a real gesture the Dock is already tracking
+    double from;      // signed progress the slide starts at
+    double to;        // signed progress the slide ends at (0 = back where it started)
+    double velocity;  // signed release velocity
     double durationMs;
 } ISSSlideRequest;
 
-/** @brief Drags the swipe from 0 to full progress over the request's duration, then releases.
+/** @brief Drags the swipe from `from` to `to` over the request's duration, then releases.
  *
  * Releasing a barely-moved swipe at low velocity leaves the Dock to finish with
  * its spring, whose slow tail delays focus. Arriving at full progress before the
@@ -715,36 +776,89 @@ typedef struct {
 static void iss_run_slide(void *context) {
     ISSSlideRequest *request = context;
     const unsigned int frames = (unsigned int)fmax(1.0, request->durationMs * 1000.0 / kSlideFrameMicroseconds);
+    // Progress is passed pre-signed, so the poster's sign is always +1
+    const double direction = request->to != 0.0 ? request->to : request->from;
 
-    iss_post_legacy_dock_swipe(kCGSGesturePhaseBegan, request->motion, request->sign,
-                               kSlideReleaseVelocity, 0.000016);
+    if (request->postBegan) {
+        iss_post_legacy_dock_swipe(kCGSGesturePhaseBegan, request->motion, 1.0, request->velocity,
+                                   copysign(kMinimalProgress, direction));
+    }
     for (unsigned int i = 1; i <= frames; i++) {
         usleep(kSlideFrameMicroseconds);
-        iss_post_legacy_dock_swipe(kCGSGesturePhaseChanged, request->motion, request->sign,
-                                   kSlideReleaseVelocity, (double)i / frames);
+        const double progress = request->from + (request->to - request->from) * i / frames;
+        iss_post_legacy_dock_swipe(kCGSGesturePhaseChanged, request->motion, 1.0, request->velocity,
+                                   progress != 0.0 ? progress : copysign(kMinimalProgress, direction));
     }
-    iss_post_legacy_dock_swipe(kCGSGesturePhaseEnded, request->motion, request->sign,
-                               kSlideReleaseVelocity, 1.0);
+    iss_post_legacy_dock_swipe(kCGSGesturePhaseEnded, request->motion, 1.0, request->velocity,
+                               request->to != 0.0 ? request->to : copysign(kMinimalProgress, direction));
 
     free(request);
     atomic_fetch_sub(&pendingSlides, 1);
 }
 
-static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durationMs) {
-    ISSSlideRequest *request = malloc(sizeof(*request));
-    if (!request) {
+static bool iss_enqueue_slide_request(ISSSlideRequest request) {
+    ISSSlideRequest *copy = malloc(sizeof(*copy));
+    if (!copy) {
         return false;
     }
-    request->motion = motion;
-    request->sign = sign;
-    request->durationMs = durationMs;
+    *copy = request;
 
     if (!slideQueue) {
         slideQueue = dispatch_queue_create("iss.slide", DISPATCH_QUEUE_SERIAL);
     }
     atomic_fetch_add(&pendingSlides, 1);
-    dispatch_async_f(slideQueue, request, iss_run_slide);
+    dispatch_async_f(slideQueue, copy, iss_run_slide);
     return true;
+}
+
+static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durationMs) {
+    return iss_enqueue_slide_request((ISSSlideRequest){
+        .motion = motion,
+        .postBegan = true,
+        .from = 0.0,
+        .to = sign,
+        .velocity = sign * kSlideReleaseVelocity,
+        .durationMs = durationMs,
+    });
+}
+
+/** @brief Finishes a real horizontal swipe the user has just released.
+ *
+ * The Dock tracked the fingers up to `progress`; slide the rest of the way
+ * toward the last direction of movement (a full switch, or back to the current
+ * space) at the configured speed, then release, so there's no spring tail.
+ */
+static void iss_finish_followed_swipe(double progress, double lastDirection) {
+    double target = 0.0;
+    // Moving away from the current space (or from rest) commits to the space on that side
+    if (lastDirection != 0.0 && (progress == 0.0 || (lastDirection > 0.0) == (progress > 0.0))) {
+        ISSDirection dir = iss_direction_from_gesture_value(lastDirection);
+        ISSSpaceInfo info;
+        const bool hasInfo = iss_get_space_info(&info);
+        // Past the first/last space there's nothing to switch to; snap back instead
+        if (!hasInfo || !iss_should_block_switch(&info, dir)) {
+            target = lastDirection > 0.0 ? 1.0 : -1.0;
+            if (hasInfo) {
+                unsigned int predicted;
+                unsigned int current = get_prediction(info.displayID, &predicted) ? predicted : info.currentIndex;
+                unsigned int newIndex = dir == ISSDirectionLeft ? current - 1 : current + 1;
+                set_prediction(info.displayID, newIndex);
+                if (switchCallback) { switchCallback(newIndex); }
+            }
+        }
+    }
+
+    // A full slide's duration covers a full space; scale by the distance left
+    const double durationMs = slideDurationMs * fabs(target - progress);
+    lastGestureTime = CFAbsoluteTimeGetCurrent() + durationMs / 1000.0;
+    iss_enqueue_slide_request((ISSSlideRequest){
+        .motion = kCGGestureMotionHorizontal,
+        .postBegan = false,
+        .from = progress,
+        .to = target,
+        .velocity = target * kSlideReleaseVelocity,
+        .durationMs = durationMs,
+    });
 }
 
 static bool iss_perform_switch_gesture(ISSDirection direction, double velocity) {
@@ -1002,6 +1116,11 @@ void iss_set_swipe_override(bool enabled) {
 
 void iss_set_gesture_speed(double speed) {
     gestureSpeed = speed;
+}
+
+void iss_set_swipe_follow_fingers(bool enabled) {
+    followFingersEnabled = enabled;
+    followTracking = false;
 }
 
 void iss_set_mission_control_override(bool enabled) {

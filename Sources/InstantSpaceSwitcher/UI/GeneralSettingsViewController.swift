@@ -13,6 +13,8 @@ final class GeneralSettingsViewController: NSViewController {
     checkboxWithTitle: "Show on-screen display in Mission Control", target: nil, action: nil)
   private let swipeOverrideCheckbox = NSButton(
     checkboxWithTitle: "Override swipe gesture", target: nil, action: nil)
+  private let swipeModePopup = NSPopUpButton()
+  private let swipeModes = ["Instant", "Follow fingers, snap on release"]
   private let missionControlOverrideCheckbox = NSButton(
     checkboxWithTitle: "Speed up Mission Control (swipe up / F3)", target: nil, action: nil)
   private let animationSpeedSlider = NSSlider()
@@ -55,6 +57,8 @@ final class GeneralSettingsViewController: NSViewController {
     showOSDInMissionControlCheckbox.action = #selector(showOSDInMissionControlChanged)
     swipeOverrideCheckbox.target = self
     swipeOverrideCheckbox.action = #selector(swipeOverrideChanged)
+    swipeModePopup.target = self
+    swipeModePopup.action = #selector(swipeModeChanged)
     missionControlOverrideCheckbox.target = self
     missionControlOverrideCheckbox.action = #selector(missionControlOverrideChanged)
     animationSpeedSlider.target = self
@@ -75,7 +79,13 @@ final class GeneralSettingsViewController: NSViewController {
     let systemLabel = NSTextField(labelWithString: "System:")
     formView.addRow(label: systemLabel, control: launchAtLoginCheckbox)
     formView.addRow(label: nil, control: hideMenuBarIconCheckbox)
-    formView.addRow(label: nil, control: swipeOverrideCheckbox)
+    for mode in swipeModes { swipeModePopup.addItem(withTitle: mode) }
+    let swipeContainer = NSStackView()
+    swipeContainer.orientation = .horizontal
+    swipeContainer.spacing = 8
+    swipeContainer.addArrangedSubview(swipeOverrideCheckbox)
+    swipeContainer.addArrangedSubview(swipeModePopup)
+    formView.addRow(label: nil, control: swipeContainer)
     formView.addRow(label: nil, control: missionControlOverrideCheckbox)
 
     let experimentalTitle = NSMutableAttributedString(string: "Enable Mission Control/Exposé detection\n")
@@ -141,6 +151,8 @@ final class GeneralSettingsViewController: NSViewController {
 
     hideMenuBarIconCheckbox.state = defaults.bool(forKey: "hideMenuBarIcon") ? .on : .off
     swipeOverrideCheckbox.state = defaults.bool(forKey: "swipeOverride") ? .on : .off
+    swipeModePopup.selectItem(at: defaults.bool(forKey: "swipeFollowFingers") ? 1 : 0)
+    swipeModePopup.isEnabled = swipeOverrideCheckbox.state == .on
     missionControlOverrideCheckbox.state = defaults.bool(forKey: "missionControlOverride") ? .on : .off
 
     let savedDuration = defaults.object(forKey: ISS_SLIDE_DURATION_KEY) as? Double ?? ISS_DEFAULT_SLIDE_DURATION_MS
@@ -181,7 +193,14 @@ final class GeneralSettingsViewController: NSViewController {
   @objc private func swipeOverrideChanged(_ sender: NSButton) {
     let isEnabled = sender.state == .on
     defaults.set(isEnabled, forKey: "swipeOverride")
+    swipeModePopup.isEnabled = isEnabled
     iss_set_swipe_override(isEnabled)
+  }
+
+  @objc private func swipeModeChanged(_ sender: NSPopUpButton) {
+    let followFingers = sender.indexOfSelectedItem == 1
+    defaults.set(followFingers, forKey: "swipeFollowFingers")
+    iss_set_swipe_follow_fingers(followFingers)
   }
 
   @objc private func missionControlOverrideChanged(_ sender: NSButton) {

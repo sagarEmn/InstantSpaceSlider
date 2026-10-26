@@ -17,6 +17,8 @@ final class GeneralSettingsViewController: NSViewController {
   private let swipeModes = ["Instant", "Follow fingers, snap on release"]
   private let missionControlOverrideCheckbox = NSButton(
     checkboxWithTitle: "Speed up Mission Control (swipe up / F3)", target: nil, action: nil)
+  private let missionControlAlignCheckbox = NSButton(
+    checkboxWithTitle: "Open on the current space when in a full-screen app", target: nil, action: nil)
   private let animationSpeedSlider = NSSlider()
   private let animationSpeedValueLabel = NSTextField(labelWithString: "")
   private let launchAtLoginCheckbox = NSButton(
@@ -61,6 +63,8 @@ final class GeneralSettingsViewController: NSViewController {
     swipeModePopup.action = #selector(swipeModeChanged)
     missionControlOverrideCheckbox.target = self
     missionControlOverrideCheckbox.action = #selector(missionControlOverrideChanged)
+    missionControlAlignCheckbox.target = self
+    missionControlAlignCheckbox.action = #selector(missionControlAlignChanged)
     animationSpeedSlider.target = self
     animationSpeedSlider.action = #selector(animationSpeedChanged)
     animationSpeedSlider.isContinuous = true
@@ -87,6 +91,7 @@ final class GeneralSettingsViewController: NSViewController {
     swipeContainer.addArrangedSubview(swipeModePopup)
     formView.addRow(label: nil, control: swipeContainer)
     formView.addRow(label: nil, control: missionControlOverrideCheckbox)
+    formView.addRow(label: nil, control: missionControlAlignCheckbox)
 
     let experimentalTitle = NSMutableAttributedString(string: "Enable Mission Control/Exposé detection\n")
     let sublabel = NSAttributedString(
@@ -154,6 +159,8 @@ final class GeneralSettingsViewController: NSViewController {
     swipeModePopup.selectItem(at: defaults.bool(forKey: "swipeFollowFingers") ? 1 : 0)
     swipeModePopup.isEnabled = swipeOverrideCheckbox.state == .on
     missionControlOverrideCheckbox.state = defaults.bool(forKey: "missionControlOverride") ? .on : .off
+    missionControlAlignCheckbox.state = defaults.bool(forKey: "missionControlAlign") ? .on : .off
+    missionControlAlignCheckbox.isEnabled = missionControlOverrideCheckbox.state == .on
 
     let savedDuration = defaults.object(forKey: ISS_SLIDE_DURATION_KEY) as? Double ?? ISS_DEFAULT_SLIDE_DURATION_MS
     let slideDuration = min(max(savedDuration, 0), ISS_MAX_SLIDE_DURATION_MS)
@@ -207,6 +214,13 @@ final class GeneralSettingsViewController: NSViewController {
     let isEnabled = sender.state == .on
     defaults.set(isEnabled, forKey: "missionControlOverride")
     iss_set_mission_control_override(isEnabled)
+    missionControlAlignCheckbox.isEnabled = isEnabled
+  }
+
+  @objc private func missionControlAlignChanged(_ sender: NSButton) {
+    let isEnabled = sender.state == .on
+    defaults.set(isEnabled, forKey: "missionControlAlign")
+    iss_set_mission_control_align(isEnabled)
   }
 
   @objc private func animationSpeedChanged(_ sender: NSSlider) {

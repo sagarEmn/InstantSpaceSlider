@@ -159,6 +159,16 @@ void iss_set_swipe_follow_fingers(bool enabled);
 void iss_set_mission_control_override(bool enabled);
 
 /**
+ * @brief Makes Mission Control open on the current space when opened from a full-screen app.
+ *
+ * macOS opens Mission Control on the last regular desktop; when enabled, the
+ * Mission Control override swipes its view back to the space it was opened
+ * from as soon as it has finished opening.
+ * @param enabled true to align, false to leave Mission Control where macOS opens it.
+ */
+void iss_set_mission_control_align(bool enabled);
+
+/**
  * @brief Returns true while animated switches are still being posted.
  * Short-lived callers (e.g. the CLI) should keep their run loop alive until this is false.
  */

@@ -43,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if UserDefaults.standard.bool(forKey: "missionControlOverride") {
       iss_set_mission_control_override(true)
     }
+    iss_set_mission_control_align(UserDefaults.standard.bool(forKey: "missionControlAlign"))
 
     let gestureSpeed = UserDefaults.standard.double(forKey: "gestureSpeed")
     if gestureSpeed > 0 {

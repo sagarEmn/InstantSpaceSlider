@@ -108,6 +108,13 @@ static const double kVerticalDirectionThreshold = 0.03;
 static const double kVerticalEarlyCommit = 0.15;
 static bool horizontalActive = false;
 
+// Mission Control always opens on a regular desktop (the last one used), even
+// when invoked from a full-screen app. Optionally swipe its view back to the
+// space it was opened from, once it has finished opening.
+static bool missionControlAlignEnabled = false;
+static CGSSpaceID lastDesktopSpaceID = 0;
+static const double kMissionControlSettleMs = 80.0;
+
 // Our macOS 27 swipes re-enter the tap with sourcePid == 0, so count them out instead
 static unsigned int syntheticEventsToPassThrough = 0;
 
@@ -168,11 +175,19 @@ static void set_prediction(const char *displayID, unsigned int index) {
     CFRelease(val);
 }
 
+// Per-space details, filled alongside ISSSpaceInfo when requested
+#define ISS_MAX_SPACES 64
+typedef struct {
+    CGSSpaceID ids[ISS_MAX_SPACES];
+    bool isDesktop[ISS_MAX_SPACES]; // false for full-screen app spaces
+} ISSSpaceLayout;
+
 static bool extract_space_info_from_display(CFDictionaryRef displayDict,
                                             CGSSpaceID activeSpace,
                                             bool hasActiveSpace,
-                                            ISSSpaceInfo *outInfo);
-static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay);
+                                            ISSSpaceInfo *outInfo,
+                                            ISSSpaceLayout *outLayout);
+static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay, ISSSpaceLayout *layout);
 static bool iss_perform_switch_gesture(ISSDirection direction, double velocity);
 static bool iss_switch_with_info(const ISSSpaceInfo *info, ISSDirection direction);
 static bool iss_should_block_switch(const ISSSpaceInfo *info, ISSDirection direction);
@@ -244,6 +259,22 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
     }
 }
 
+static int iss_mission_control_alignment_steps(void);
+static bool iss_enqueue_slide_after(CGGestureMotion motion, double sign, double durationMs, double delayMs);
+
+// Slide in a vertical direction; when that opens Mission Control, move its view
+// to the space it was opened from if that's a full-screen app.
+static void iss_vertical_slide(double sign) {
+    const bool opening = sign == kMissionControlOpenSign && !iss_is_mission_control_active();
+    const int steps = opening && missionControlAlignEnabled ? iss_mission_control_alignment_steps() : 0;
+
+    iss_enqueue_slide(kCGGestureMotionVertical, sign, slideDurationMs);
+    for (int i = 0; i < abs(steps); i++) {
+        iss_enqueue_slide_after(kCGGestureMotionHorizontal, steps > 0 ? 1.0 : -1.0,
+                                slideDurationMs / abs(steps), i == 0 ? kMissionControlSettleMs : 0.0);
+    }
+}
+
 // Replace a real vertical (Mission Control / App Exposé) swipe with a fast slide
 // in the same direction, so the Dock has no spring tail left to play.
 static CGEventRef vertical_swipe_override(CGEventRef event) {
@@ -272,7 +303,7 @@ static CGEventRef vertical_swipe_override(CGEventRef event) {
                 verticalFired = true;
                 // Negative (swipe up) opens Mission Control
                 const double sign = value < 0.0 ? kMissionControlOpenSign : -kMissionControlOpenSign;
-                iss_enqueue_slide(kCGGestureMotionVertical, sign, slideDurationMs);
+                iss_vertical_slide(sign);
             }
         }
         if (phase == kCGSGesturePhaseEnded) {
@@ -331,8 +362,7 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
         }
         if (type == kCGEventKeyDown && !CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat)) {
             // Without a real swipe to copy, close if Mission Control looks open, otherwise open
-            const double sign = iss_is_mission_control_active() ? -kMissionControlOpenSign : kMissionControlOpenSign;
-            iss_enqueue_slide(kCGGestureMotionVertical, sign, slideDurationMs);
+            iss_vertical_slide(iss_is_mission_control_active() ? -kMissionControlOpenSign : kMissionControlOpenSign);
         }
         return NULL;
     }
@@ -443,7 +473,8 @@ static bool cgs_symbols_available(void) {
 static bool extract_space_info_from_display(CFDictionaryRef displayDict,
                                             CGSSpaceID activeSpace,
                                             bool hasActiveSpace,
-                                            ISSSpaceInfo *outInfo) {
+                                            ISSSpaceInfo *outInfo,
+                                            ISSSpaceLayout *outLayout) {
     if (!displayDict || !outInfo) {
         return false;
     }
@@ -499,6 +530,16 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
                 activeIndex = totalSpaces;
                 foundActive = true;
             }
+            if (outLayout && totalSpaces < ISS_MAX_SPACES) {
+                // Space type 0 is a regular desktop; full-screen apps get their own type
+                int spaceType = 0;
+                CFNumberRef typeNumber = (CFNumberRef)CFDictionaryGetValue(spaceDict, CFSTR("type"));
+                if (typeNumber && CFGetTypeID(typeNumber) == CFNumberGetTypeID()) {
+                    CFNumberGetValue(typeNumber, kCFNumberIntType, &spaceType);
+                }
+                outLayout->ids[totalSpaces] = candidate;
+                outLayout->isDesktop[totalSpaces] = spaceType == 0;
+            }
             totalSpaces++;
         }
     }
@@ -512,7 +553,7 @@ static bool extract_space_info_from_display(CFDictionaryRef displayDict,
     return true;
 }
 
-static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay) {
+static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDisplay, ISSSpaceLayout *layout) {
     if (!cgs_symbols_available()) {
         fprintf(stderr, "ISS: required CGS symbols missing\n");
         return false;
@@ -607,7 +648,7 @@ static bool load_space_info_for_display(ISSSpaceInfo *info, bool useCursorDispla
 
     bool success = false;
     if (targetDisplay) {
-        success = extract_space_info_from_display(targetDisplay, activeSpace, hasActiveSpace, info);
+        success = extract_space_info_from_display(targetDisplay, activeSpace, hasActiveSpace, info, layout);
     }
 
     if (activeDisplayIdentifier) {
@@ -780,6 +821,7 @@ typedef struct {
     double to;        // signed progress the slide ends at (0 = back where it started)
     double velocity;  // signed release velocity
     double durationMs;
+    double delayMs;   // pause before starting, e.g. for Mission Control to finish opening
 } ISSSlideRequest;
 
 /** @brief Drags the swipe from `from` to `to` over the request's duration, then releases.
@@ -795,6 +837,10 @@ static void iss_run_slide(void *context) {
     const unsigned int frames = (unsigned int)fmax(1.0, request->durationMs * 1000.0 / kSlideFrameMicroseconds);
     // Progress is passed pre-signed, so the poster's sign is always +1
     const double direction = request->to != 0.0 ? request->to : request->from;
+
+    if (request->delayMs > 0.0) {
+        usleep((useconds_t)(request->delayMs * 1000.0));
+    }
 
     if (request->postBegan) {
         iss_post_legacy_dock_swipe(kCGSGesturePhaseBegan, request->motion, 1.0, request->velocity,
@@ -828,7 +874,7 @@ static bool iss_enqueue_slide_request(ISSSlideRequest request) {
     return true;
 }
 
-static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durationMs) {
+static bool iss_enqueue_slide_after(CGGestureMotion motion, double sign, double durationMs, double delayMs) {
     return iss_enqueue_slide_request((ISSSlideRequest){
         .motion = motion,
         .postBegan = true,
@@ -836,7 +882,49 @@ static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durati
         .to = sign,
         .velocity = sign * kSlideReleaseVelocity,
         .durationMs = durationMs,
+        .delayMs = delayMs,
     });
+}
+
+static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durationMs) {
+    return iss_enqueue_slide_after(motion, sign, durationMs, 0.0);
+}
+
+// Remember the last regular desktop, which is where Mission Control opens
+static void iss_note_active_space(void) {
+    ISSSpaceInfo info;
+    ISSSpaceLayout layout;
+    memset(&info, 0, sizeof(info));
+    if (load_space_info_for_display(&info, true, &layout) && info.currentIndex < ISS_MAX_SPACES &&
+        layout.isDesktop[info.currentIndex]) {
+        lastDesktopSpaceID = layout.ids[info.currentIndex];
+    }
+}
+
+/** @brief Signed number of spaces from where Mission Control opens to the current space.
+ * Zero when the current space is a regular desktop (Mission Control opens on it already).
+ */
+static int iss_mission_control_alignment_steps(void) {
+    ISSSpaceInfo info;
+    ISSSpaceLayout layout;
+    memset(&info, 0, sizeof(info));
+    if (!load_space_info_for_display(&info, true, &layout)) {
+        return 0;
+    }
+    const unsigned int count = info.spaceCount < ISS_MAX_SPACES ? info.spaceCount : ISS_MAX_SPACES;
+    if (info.currentIndex >= count || layout.isDesktop[info.currentIndex]) {
+        return 0;
+    }
+
+    int opensOn = -1;
+    for (unsigned int i = 0; i < count && opensOn < 0; i++) {
+        if (layout.isDesktop[i] && layout.ids[i] == lastDesktopSpaceID) opensOn = (int)i;
+    }
+    // Not seen a desktop yet this session; assume the first one
+    for (unsigned int i = 0; i < count && opensOn < 0; i++) {
+        if (layout.isDesktop[i]) opensOn = (int)i;
+    }
+    return opensOn < 0 ? 0 : (int)info.currentIndex - opensOn;
 }
 
 /** @brief Finishes a real horizontal swipe the user has just released.
@@ -1045,7 +1133,7 @@ bool iss_get_space_info(ISSSpaceInfo *info) {
     }
 
     memset(info, 0, sizeof(*info));
-    return load_space_info_for_display(info, true);
+    return load_space_info_for_display(info, true, NULL);
 }
 
 bool iss_get_menubar_space_info(ISSSpaceInfo *info) {
@@ -1054,7 +1142,7 @@ bool iss_get_menubar_space_info(ISSSpaceInfo *info) {
     }
 
     memset(info, 0, sizeof(*info));
-    return load_space_info_for_display(info, false);
+    return load_space_info_for_display(info, false, NULL);
 }
 
 static bool iss_switch_with_info(const ISSSpaceInfo *info, ISSDirection direction) {
@@ -1140,6 +1228,13 @@ void iss_set_swipe_follow_fingers(bool enabled) {
     followTracking = false;
 }
 
+void iss_set_mission_control_align(bool enabled) {
+    missionControlAlignEnabled = enabled;
+    if (enabled) {
+        iss_note_active_space();
+    }
+}
+
 void iss_set_mission_control_override(bool enabled) {
     missionControlOverrideEnabled = enabled;
     if (!enabled) {
@@ -1157,6 +1252,7 @@ bool iss_is_animating(void) {
 }
 
 void iss_reset_predictions(void) {
+    iss_note_active_space();
     // Space-change notifications fire for every intermediate hop of our own
     // gestures; ignore them until the burst has settled.
     if (gestures_in_flight()) return;

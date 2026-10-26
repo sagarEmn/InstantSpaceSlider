@@ -261,6 +261,22 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
 
 static int iss_mission_control_alignment_steps(void);
 static bool iss_enqueue_slide_after(CGGestureMotion motion, double sign, double durationMs, double delayMs);
+static bool iss_enqueue_vertical_began(double sign);
+static bool iss_enqueue_vertical_finish(double sign, double durationMs);
+
+// TEMP experiment: when to hop Mission Control's view (0 = 80 ms after opening,
+// 1 = right after opening, 2 = between the opening swipe's began and its ramp)
+static long iss_mission_control_align_timing(void) {
+    long timing = 0;
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("mcAlignTiming"), kCFPreferencesCurrentApplication);
+    if (value) {
+        if (CFGetTypeID(value) == CFNumberGetTypeID()) {
+            CFNumberGetValue((CFNumberRef)value, kCFNumberLongType, &timing);
+        }
+        CFRelease(value);
+    }
+    return timing;
+}
 
 // Slide in a vertical direction; when that opens Mission Control, move its view
 // to the space it was opened from if that's a full-screen app.
@@ -268,10 +284,20 @@ static void iss_vertical_slide(double sign) {
     const bool opening = sign == kMissionControlOpenSign && !iss_is_mission_control_active();
     const int steps = opening && missionControlAlignEnabled ? iss_mission_control_alignment_steps() : 0;
 
-    iss_enqueue_slide(kCGGestureMotionVertical, sign, slideDurationMs);
+    const long timing = steps != 0 ? iss_mission_control_align_timing() : 0;
+
+    if (timing == 2) {
+        iss_enqueue_vertical_began(sign);
+    } else {
+        iss_enqueue_slide(kCGGestureMotionVertical, sign, slideDurationMs);
+    }
+    // Hop with no animation (0 ms) so the view doesn't visibly slide past the other spaces
     for (int i = 0; i < abs(steps); i++) {
         iss_enqueue_slide_after(kCGGestureMotionHorizontal, steps > 0 ? 1.0 : -1.0,
-                                slideDurationMs / abs(steps), i == 0 ? kMissionControlSettleMs : 0.0);
+                                0.0, i == 0 && timing == 0 ? kMissionControlSettleMs : 0.0);
+    }
+    if (timing == 2) {
+        iss_enqueue_vertical_finish(sign, slideDurationMs);
     }
 }
 
@@ -817,6 +843,7 @@ static const double kMinimalProgress = 0.000016;
 typedef struct {
     CGGestureMotion motion;
     bool postBegan;   // false when continuing a real gesture the Dock is already tracking
+    bool beganOnly;   // post just the began event; a later request finishes the gesture
     double from;      // signed progress the slide starts at
     double to;        // signed progress the slide ends at (0 = back where it started)
     double velocity;  // signed release velocity
@@ -845,6 +872,11 @@ static void iss_run_slide(void *context) {
     if (request->postBegan) {
         iss_post_legacy_dock_swipe(kCGSGesturePhaseBegan, request->motion, 1.0, request->velocity,
                                    copysign(kMinimalProgress, direction));
+    }
+    if (request->beganOnly) {
+        free(request);
+        atomic_fetch_sub(&pendingSlides, 1);
+        return;
     }
     for (unsigned int i = 1; i <= frames; i++) {
         usleep(kSlideFrameMicroseconds);
@@ -888,6 +920,27 @@ static bool iss_enqueue_slide_after(CGGestureMotion motion, double sign, double 
 
 static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durationMs) {
     return iss_enqueue_slide_after(motion, sign, durationMs, 0.0);
+}
+
+static bool iss_enqueue_vertical_began(double sign) {
+    return iss_enqueue_slide_request((ISSSlideRequest){
+        .motion = kCGGestureMotionVertical,
+        .postBegan = true,
+        .beganOnly = true,
+        .to = sign,
+        .velocity = sign * kSlideReleaseVelocity,
+    });
+}
+
+static bool iss_enqueue_vertical_finish(double sign, double durationMs) {
+    return iss_enqueue_slide_request((ISSSlideRequest){
+        .motion = kCGGestureMotionVertical,
+        .postBegan = false,
+        .from = 0.0,
+        .to = sign,
+        .velocity = sign * kSlideReleaseVelocity,
+        .durationMs = durationMs,
+    });
 }
 
 // Remember the last regular desktop, which is where Mission Control opens

@@ -19,6 +19,8 @@ final class GeneralSettingsViewController: NSViewController {
     checkboxWithTitle: "Speed up Mission Control (swipe up / F3)", target: nil, action: nil)
   private let animationSpeedSlider = NSSlider()
   private let animationSpeedValueLabel = NSTextField(labelWithString: "")
+  private let missionControlSpeedSlider = NSSlider()
+  private let missionControlSpeedValueLabel = NSTextField(labelWithString: "")
   private let launchAtLoginCheckbox = NSButton(
     checkboxWithTitle: "Launch at login", target: nil, action: nil)
   private let hideMenuBarIconCheckbox = NSButton(
@@ -27,6 +29,10 @@ final class GeneralSettingsViewController: NSViewController {
   private let durationPresets = [100, 200, 300, 500, 750, 1000]
   // Slides shorter than this snap to instant (no animation)
   private let instantSnapMs = 10.0
+  // Mission Control slider runs on log10(release velocity) so the visible range isn't cramped
+  private let minMissionControlSpeed = 10.0
+  // Within this fraction of the right end, snap to instant (no animation)
+  private let missionControlInstantSnap = 0.97
 
   private let defaults = UserDefaults.standard
 
@@ -67,6 +73,11 @@ final class GeneralSettingsViewController: NSViewController {
     // Slider runs slow-to-fast, so its value is the time saved off the longest slide
     animationSpeedSlider.minValue = 0
     animationSpeedSlider.maxValue = ISS_MAX_SLIDE_DURATION_MS
+    missionControlSpeedSlider.target = self
+    missionControlSpeedSlider.action = #selector(missionControlSpeedChanged)
+    missionControlSpeedSlider.isContinuous = true
+    missionControlSpeedSlider.minValue = log10(minMissionControlSpeed)
+    missionControlSpeedSlider.maxValue = log10(ISS_INSTANT_MISSION_CONTROL_SWIPE_SPEED)
     launchAtLoginCheckbox.target = self
     launchAtLoginCheckbox.action = #selector(launchAtLoginChanged)
     hideMenuBarIconCheckbox.target = self
@@ -114,6 +125,19 @@ final class GeneralSettingsViewController: NSViewController {
     animationContainer.addArrangedSubview(NSTextField(labelWithString: "Instant"))
     animationContainer.addArrangedSubview(animationSpeedValueLabel)
     formView.addRow(label: animationLabel, control: animationContainer)
+
+    let missionControlSpeedLabel = NSTextField(labelWithString: "Mission Control Swipes:")
+    missionControlSpeedSlider.widthAnchor.constraint(equalToConstant: 200).isActive = true
+    missionControlSpeedValueLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+
+    let missionControlSpeedContainer = NSStackView()
+    missionControlSpeedContainer.orientation = .horizontal
+    missionControlSpeedContainer.spacing = 8
+    missionControlSpeedContainer.addArrangedSubview(NSTextField(labelWithString: "Slower"))
+    missionControlSpeedContainer.addArrangedSubview(missionControlSpeedSlider)
+    missionControlSpeedContainer.addArrangedSubview(NSTextField(labelWithString: "Instant"))
+    missionControlSpeedContainer.addArrangedSubview(missionControlSpeedValueLabel)
+    formView.addRow(label: missionControlSpeedLabel, control: missionControlSpeedContainer)
     formView.addSectionSpacing()
 
     // OSD
@@ -159,6 +183,12 @@ final class GeneralSettingsViewController: NSViewController {
     let slideDuration = min(max(savedDuration, 0), ISS_MAX_SLIDE_DURATION_MS)
     animationSpeedSlider.doubleValue = ISS_MAX_SLIDE_DURATION_MS - slideDuration
     updateAnimationSpeedLabel(slideDuration)
+
+    let savedMissionControlSpeed = defaults.object(forKey: ISS_MISSION_CONTROL_SWIPE_SPEED_KEY) as? Double
+      ?? ISS_DEFAULT_MISSION_CONTROL_SWIPE_SPEED
+    let missionControlSpeed = min(max(savedMissionControlSpeed, minMissionControlSpeed), ISS_INSTANT_MISSION_CONTROL_SWIPE_SPEED)
+    missionControlSpeedSlider.doubleValue = log10(missionControlSpeed)
+    updateMissionControlSpeedLabel(missionControlSpeed)
 
     launchAtLoginCheckbox.state = SMAppService.mainApp.status == .enabled ? .on : .off
   }
@@ -216,6 +246,23 @@ final class GeneralSettingsViewController: NSViewController {
     updateAnimationSpeedLabel(slideDuration)
     defaults.set(slideDuration, forKey: ISS_SLIDE_DURATION_KEY)
     iss_set_slide_duration(slideDuration)
+  }
+
+  @objc private func missionControlSpeedChanged(_ sender: NSSlider) {
+    let fraction = (sender.doubleValue - sender.minValue) / (sender.maxValue - sender.minValue)
+    let velocity = fraction >= missionControlInstantSnap
+      ? ISS_INSTANT_MISSION_CONTROL_SWIPE_SPEED
+      : pow(10, sender.doubleValue).rounded()
+
+    updateMissionControlSpeedLabel(velocity)
+    defaults.set(velocity, forKey: ISS_MISSION_CONTROL_SWIPE_SPEED_KEY)
+    iss_set_mission_control_swipe_speed(velocity)
+  }
+
+  private func updateMissionControlSpeedLabel(_ velocity: Double) {
+    missionControlSpeedValueLabel.stringValue = velocity >= ISS_INSTANT_MISSION_CONTROL_SWIPE_SPEED
+      ? "(instant)"
+      : "(\(Int(velocity)))"
   }
 
   private func updateAnimationSpeedLabel(_ slideDuration: Double) {

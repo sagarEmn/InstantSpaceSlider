@@ -210,16 +210,8 @@ static void iss_finish_followed_swipe(double progress, double lastDirection);
 
 // Let a real horizontal swipe through so the space follows the fingers, then
 // replace its release with a fast finish toward the last direction of movement.
-/** @brief Release speed for swipes inside Mission Control, from the Animation Speed slider.
- *
- * 2000 skips the animation entirely and real flicks are around 3-5. Around 40-80
- * the slide is visible but fast, so scale from 60 at the default duration
- * (24 at the slowest, 300 ms) up to instant at 0 ms.
- */
-static double iss_mission_control_release_velocity(void) {
-    if (slideDurationMs <= 0.0) return kSlideReleaseVelocity;
-    return fmin(kSlideReleaseVelocity, 60.0 * ISS_DEFAULT_SLIDE_DURATION_MS / slideDurationMs);
-}
+// Release speed for swipes inside Mission Control (its own setting; see iss_set_mission_control_swipe_speed)
+static double missionControlSwipeSpeed = ISS_DEFAULT_MISSION_CONTROL_SWIPE_SPEED;
 
 static CGEventRef follow_fingers_swipe(CGEventRef event) {
     CGSGesturePhase phase =
@@ -250,7 +242,7 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
             // Synthetic progress confuses Mission Control's view, so let the real release
             // through and just make it a quick flick in the last direction of movement
             if (direction != 0.0) {
-                const double releaseVelocity = direction * iss_mission_control_release_velocity();
+                const double releaseVelocity = direction * missionControlSwipeSpeed;
                 CGEventSetDoubleValueField(event, kCGEventGestureSwipeVelocityX, releaseVelocity);
                 CGEventSetDoubleValueField(event, kCGEventGestureSwipeVelocityY, releaseVelocity);
             }
@@ -1182,6 +1174,10 @@ void iss_set_mission_control_override(bool enabled) {
         verticalTracking = false;
         verticalFired = false;
     }
+}
+
+void iss_set_mission_control_swipe_speed(double velocity) {
+    missionControlSwipeSpeed = velocity > 0.0 ? velocity : ISS_DEFAULT_MISSION_CONTROL_SWIPE_SPEED;
 }
 
 void iss_set_slide_duration(double milliseconds) {

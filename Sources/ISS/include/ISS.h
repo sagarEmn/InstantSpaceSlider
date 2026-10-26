@@ -158,6 +158,25 @@ void iss_set_swipe_follow_fingers(bool enabled);
  */
 void iss_set_mission_control_override(bool enabled);
 
+/** @brief Default release speed for swipes inside Mission Control: a fast but visible slide. */
+#define ISS_DEFAULT_MISSION_CONTROL_SWIPE_SPEED 60.0
+
+/** @brief Release speed at which Mission Control skips the slide animation. */
+#define ISS_INSTANT_MISSION_CONTROL_SWIPE_SPEED 2000.0
+
+/** @brief Preferences key holding the Mission Control swipe speed. */
+#define ISS_MISSION_CONTROL_SWIPE_SPEED_KEY "missionControlSwipeSpeed"
+
+/**
+ * @brief Sets how fast a sideways swipe inside Mission Control finishes once released.
+ *
+ * Inside Mission Control the real swipe is let through and its release velocity is
+ * set to this value in the last direction of movement. Real flicks are around 3-5;
+ * ISS_INSTANT_MISSION_CONTROL_SWIPE_SPEED skips the animation. Ignored on macOS 27+.
+ * @param velocity Release velocity; 0 or less restores the default.
+ */
+void iss_set_mission_control_swipe_speed(double velocity);
+
 /**
  * @brief Returns true while animated switches are still being posted.
  * Short-lived callers (e.g. the CLI) should keep their run loop alive until this is false.

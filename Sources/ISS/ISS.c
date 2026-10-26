@@ -9,6 +9,7 @@
 #include <dlfcn.h>
 #include <float.h>
 #include <mach/mach_time.h>
+#include <os/log.h> // TEMP click probe
 #include <math.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -340,6 +341,56 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
     // Mission Control override relies on the legacy (macOS 13-26) event format
     const bool missionControlOverride = missionControlOverrideEnabled && !iss_requires_event_augmentation();
     if (!swipeOverrideEnabled && !missionControlOverride) return event;
+
+    // TEMP click probe: log what Accessibility reports under the pointer in Mission Control
+    if (type == kCGEventLeftMouseDown) {
+        if (iss_is_mission_control_active()) {
+            static os_log_t probeLog = NULL;
+            if (!probeLog) probeLog = os_log_create("com.sagarEmn.InstantSpaceSlider", "click-probe");
+            CGPoint where = CGEventGetLocation(event);
+            AXUIElementRef systemWide = AXUIElementCreateSystemWide();
+            AXUIElementSetMessagingTimeout(systemWide, 0.3f);
+            AXUIElementRef element = NULL;
+            AXError err = AXUIElementCopyElementAtPosition(systemWide, (float)where.x, (float)where.y, &element);
+            os_log(probeLog, "click at %{public}.0f,%{public}.0f err=%{public}d", where.x, where.y, err);
+            for (int depth = 0; element && depth < 8; depth++) {
+                char role[64] = "", subrole[64] = "", title[128] = "", desc[128] = "";
+                CFTypeRef value = NULL;
+                const CFStringRef attrs[4] = { kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute };
+                char *outs[4] = { role, subrole, title, desc };
+                const size_t sizes[4] = { sizeof(role), sizeof(subrole), sizeof(title), sizeof(desc) };
+                for (int a = 0; a < 4; a++) {
+                    if (AXUIElementCopyAttributeValue(element, attrs[a], &value) == kAXErrorSuccess && value) {
+                        if (CFGetTypeID(value) == CFStringGetTypeID()) {
+                            CFStringGetCString(value, outs[a], (CFIndex)sizes[a], kCFStringEncodingUTF8);
+                        }
+                        CFRelease(value);
+                    }
+                }
+                pid_t pid = 0;
+                AXUIElementGetPid(element, &pid);
+                AXUIElementRef parent = NULL;
+                long index = -1, siblings = -1;
+                if (AXUIElementCopyAttributeValue(element, kAXParentAttribute, (CFTypeRef *)&parent) == kAXErrorSuccess && parent) {
+                    CFArrayRef children = NULL;
+                    if (AXUIElementCopyAttributeValue(parent, kAXChildrenAttribute, (CFTypeRef *)&children) == kAXErrorSuccess && children) {
+                        siblings = CFArrayGetCount(children);
+                        for (CFIndex c = 0; c < siblings; c++) {
+                            if (CFEqual(CFArrayGetValueAtIndex(children, c), element)) { index = c; break; }
+                        }
+                        CFRelease(children);
+                    }
+                }
+                os_log(probeLog, "  [%{public}d] pid=%{public}d role=%{public}s subrole=%{public}s title=%{public}s desc=%{public}s index=%{public}ld/%{public}ld",
+                       depth, pid, role, subrole, title, desc, index, siblings);
+                CFRelease(element);
+                element = parent;
+            }
+            if (element) CFRelease(element);
+            CFRelease(systemWide);
+        }
+        return event;
+    }
 
     if (type == kCGEventKeyDown || type == kCGEventKeyUp) {
         if (!missionControlOverride ||
@@ -1013,6 +1064,7 @@ bool iss_init(void) {
     }
 
     CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp)
+        | CGEventMaskBit(kCGEventLeftMouseDown) // TEMP click probe
         | (1ULL << kCGSEventGesture) | (1ULL << kCGSEventDockControl);
     globalTap = CGEventTapCreate(
         kCGSessionEventTap,

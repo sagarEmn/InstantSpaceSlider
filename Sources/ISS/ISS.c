@@ -10,6 +10,7 @@
 #include <float.h>
 #include <mach/mach_time.h>
 #include <math.h>
+#include <os/log.h> // TEMP debug
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -127,6 +128,7 @@ static const int64_t kReplayedClickMarker = 0x1555C11C;
 // A click that moved farther than this is a drag; leave it to the Dock
 static const double kClickSlop = 6.0;
 static CGEventRef mission_control_click(CGEventType type, CGEventRef event);
+static os_log_t dbg(void) { static os_log_t l; if (!l) l = os_log_create("com.sagarEmn.InstantSpaceSlider", "dbg"); return l; } // TEMP debug
 
 // Our macOS 27 swipes re-enter the tap with sourcePid == 0, so count them out instead
 static unsigned int syntheticEventsToPassThrough = 0;
@@ -407,6 +409,7 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
         if (!iss_requires_event_augmentation()) {
             if (CGEventGetIntegerValueField(event, kCGEventGesturePhase) == kCGSGesturePhaseBegan) {
                 followInMissionControl = mission_control_on_screen();
+                os_log(dbg(), "h-swipe began inMC=%{public}d", followInMissionControl); // TEMP debug
             }
             // Inside Mission Control the view follows the fingers in either mode;
             // finish it on release like follow mode so a small swipe is snappy
@@ -1008,10 +1011,27 @@ static void release_held_clicks(bool replay) {
 }
 
 static void switch_to_clicked_space(void *context) {
+    ISSSpaceInfo info; // TEMP debug
+    if (iss_get_space_info(&info)) os_log(dbg(), "click: switching %{public}u -> %{public}lu", info.currentIndex, (unsigned long)(uintptr_t)context); // TEMP debug
     iss_switch_to_index((unsigned int)(uintptr_t)context);
 }
 
+// How long to wait for Mission Control to finish closing before switching
+static const int kCloseWaitPolls = 60;
+static const useconds_t kCloseWaitPollMicroseconds = 10000;
+
 static void after_close_slide(void *context) {
+    // A slide posted while Mission Control is still on screen moves its view
+    // instead (and wraps to the first space), so wait until it's really gone
+    int polls = 0;
+    while (mission_control_on_screen()) {
+        if (++polls >= kCloseWaitPolls) {
+            os_log(dbg(), "click: MC still open after wait, not switching"); // TEMP debug
+            return;
+        }
+        usleep(kCloseWaitPollMicroseconds);
+    }
+    os_log(dbg(), "click: MC closed after %{public}d polls", polls); // TEMP debug
     // Back on the main queue, where the space predictions live
     dispatch_async_f(dispatch_get_main_queue(), context, switch_to_clicked_space);
 }
@@ -1055,6 +1075,7 @@ static void click_lookup_finished(void *context) {
     if ((unsigned int)(packed & 0xFFFF) != (clickGeneration & 0xFFFF) || !clickHeld) return;
     clickResolved = true;
     clickedSpaceIndex = (long)(packed >> 16) - 1;
+    os_log(dbg(), "click: lookup index=%{public}ld up=%{public}d", clickedSpaceIndex, heldMouseUp != NULL); // TEMP debug
     settle_held_click();
 }
 

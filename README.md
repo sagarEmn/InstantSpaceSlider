@@ -20,7 +20,15 @@ A simple CLI is provided (`InstantSpaceSlider.app/Contents/MacOS/ISSCli --help`)
 
 ## Versions: usable-v2 and usable-v3
 
-Both are tagged in this repo (`git checkout usable-v2` or `git checkout usable-v3`, then build).
+Both are tagged in this repo. To switch between them, check out the tag, rebuild and relaunch:
+
+```sh
+git checkout usable-v3   # or usable-v2
+./dist/build.sh
+pkill -x InstantSpaceSlider; open build/InstantSpaceSlider.app
+```
+
+After a rebuild, macOS may drop the Accessibility permission. If swipes or shortcuts stop working, remove the app from System Settings > Privacy & Security > Accessibility, add it back, and relaunch it.
 
 | | usable-v2 | usable-v3 |
 |---|---|---|

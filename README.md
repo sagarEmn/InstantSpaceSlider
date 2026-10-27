@@ -18,6 +18,24 @@ https://github.com/user-attachments/assets/037422c9-3fb7-41cd-8da7-58d28c4c8eff
 A simple CLI is provided (`InstantSpaceSlider.app/Contents/MacOS/ISSCli --help`). It uses the speed set in the app; pass `--duration <ms>` to override it (e.g. `ISSCli --duration 0 right` for instant).
 
 
+## Versions: usable-v2 and usable-v3
+
+Both are tagged in this repo (`git checkout usable-v2` or `git checkout usable-v3`, then build).
+
+| | usable-v2 | usable-v3 |
+|---|---|---|
+| Switching spaces (shortcuts, swipes) | Fast slide | Fast slide (same) |
+| Swipe up / F3 to open Mission Control, swipe down to close | Fast | Fast (same) |
+| Swiping left/right inside Mission Control | Native, snappy release | Same |
+| Clicking a desktop in Mission Control's Spaces bar | macOS's own zoom: smooth but slow | Fast: Mission Control closes instantly, then cuts to the clicked desktop |
+| Clicking a window in Mission Control | macOS's own zoom | macOS's own zoom (unchanged) |
+
+What isn't fast or perfect in usable-v3:
+
+- When you click a desktop other than the highlighted one, the highlighted desktop flashes for a split second before the clicked one appears. Mission Control can only close onto the highlighted desktop, and there's no public way to move the highlight first.
+- Only clicks after opening Mission Control with the three-finger swipe or F3 (with "Speed up Mission Control" on) are sped up. Mission Control opened another way (hot corner, Dock) behaves natively.
+- Window clicks inside Mission Control still use the normal animation.
+
 ## Installation
 
 ### Downloads

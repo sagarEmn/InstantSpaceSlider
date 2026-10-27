@@ -111,6 +111,23 @@ static const double kVerticalDirectionThreshold = 0.03;
 static const double kVerticalEarlyCommit = 0.15;
 static bool horizontalActive = false;
 
+// Clicking a space in Mission Control's Spaces bar: the Dock's zoom out is
+// slow, so the click is held, looked up off the tap, and replaced by our fast
+// close and slide. Only checked after our override opened Mission Control.
+static bool missionControlOpenedByUs = false;
+static bool clickHeld = false;          // a mouse down is being looked up
+static bool clickResolved = false;      // the lookup has finished for the held click
+static long clickedSpaceIndex = -1;     // its result: Spaces bar position, or -1
+static CGEventRef heldMouseDown = NULL;
+static CGEventRef heldMouseUp = NULL;
+static unsigned int clickGeneration = 0;
+static dispatch_queue_t clickQueue = NULL;
+// Marks clicks we replay so the tap lets them through
+static const int64_t kReplayedClickMarker = 0x1555C11C;
+// A click that moved farther than this is a drag; leave it to the Dock
+static const double kClickSlop = 6.0;
+static CGEventRef mission_control_click(CGEventType type, CGEventRef event);
+
 // Our macOS 27 swipes re-enter the tap with sourcePid == 0, so count them out instead
 static unsigned int syntheticEventsToPassThrough = 0;
 
@@ -290,6 +307,7 @@ static CGEventRef vertical_swipe_override(CGEventRef event) {
                 verticalFired = true;
                 // Negative (swipe up) opens Mission Control
                 const double sign = value < 0.0 ? kMissionControlOpenSign : -kMissionControlOpenSign;
+                missionControlOpenedByUs = sign == kMissionControlOpenSign;
                 iss_enqueue_slide(kCGGestureMotionVertical, sign, slideDurationMs);
             }
         }
@@ -350,9 +368,14 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
         if (type == kCGEventKeyDown && !CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat)) {
             // Without a real swipe to copy, close if Mission Control looks open, otherwise open
             const double sign = mission_control_on_screen() ? -kMissionControlOpenSign : kMissionControlOpenSign;
+            missionControlOpenedByUs = sign == kMissionControlOpenSign;
             iss_enqueue_slide(kCGGestureMotionVertical, sign, slideDurationMs);
         }
         return NULL;
+    }
+
+    if (type == kCGEventLeftMouseDown || type == kCGEventLeftMouseUp) {
+        return missionControlOverride ? mission_control_click(type, event) : event;
     }
 
     // Pass through synthetic events (non-HID source). Real gesture events
@@ -907,6 +930,212 @@ static void iss_finish_followed_swipe(double progress, double lastDirection) {
     });
 }
 
+/** @brief Returns the Spaces bar position of the button at `where`, or -1.
+ *
+ * In Mission Control the Dock exposes AXGroup "Spaces Bar" > AXList > one
+ * AXButton per space, in order. Runs on clickQueue: the Dock can be slow to
+ * answer while Mission Control animates, and the tap must never wait on it.
+ */
+static long spaces_bar_index_at(CGPoint where) {
+    AXUIElementRef systemWide = AXUIElementCreateSystemWide();
+    if (!systemWide) return -1;
+    AXUIElementSetMessagingTimeout(systemWide, 0.25f);
+
+    long index = -1;
+    AXUIElementRef button = NULL;
+    AXUIElementRef list = NULL;
+    AXUIElementRef group = NULL;
+    CFTypeRef value = NULL;
+    if (AXUIElementCopyElementAtPosition(systemWide, (float)where.x, (float)where.y, &button) != kAXErrorSuccess) {
+        button = NULL;
+        goto done;
+    }
+    if (AXUIElementCopyAttributeValue(button, kAXRoleAttribute, &value) != kAXErrorSuccess) goto done;
+    bool isButton = CFEqual(value, kAXButtonRole);
+    CFRelease(value);
+    if (!isButton) goto done;
+
+    if (AXUIElementCopyAttributeValue(button, kAXParentAttribute, (CFTypeRef *)&list) != kAXErrorSuccess) {
+        list = NULL;
+        goto done;
+    }
+    if (AXUIElementCopyAttributeValue(list, kAXParentAttribute, (CFTypeRef *)&group) != kAXErrorSuccess) {
+        group = NULL;
+        goto done;
+    }
+    if (AXUIElementCopyAttributeValue(group, kAXTitleAttribute, &value) != kAXErrorSuccess) goto done;
+    bool isSpacesBar = CFGetTypeID(value) == CFStringGetTypeID() && CFEqual(value, CFSTR("Spaces Bar"));
+    CFRelease(value);
+    if (!isSpacesBar) goto done;
+
+    CFArrayRef children = NULL;
+    if (AXUIElementCopyAttributeValue(list, kAXChildrenAttribute, (CFTypeRef *)&children) != kAXErrorSuccess) goto done;
+    for (CFIndex i = 0; i < CFArrayGetCount(children); i++) {
+        if (CFEqual(CFArrayGetValueAtIndex(children, i), button)) {
+            index = (long)i;
+            break;
+        }
+    }
+    CFRelease(children);
+
+done:
+    if (group) CFRelease(group);
+    if (list) CFRelease(list);
+    if (button) CFRelease(button);
+    CFRelease(systemWide);
+    return index;
+}
+
+static void replay_click(CGEventRef event) {
+    CGEventSetIntegerValueField(event, kCGEventSourceUserData, kReplayedClickMarker);
+    CGEventPost(kCGHIDEventTap, event);
+}
+
+static void release_held_clicks(bool replay) {
+    if (heldMouseDown) {
+        if (replay) replay_click(heldMouseDown);
+        CFRelease(heldMouseDown);
+        heldMouseDown = NULL;
+    }
+    if (heldMouseUp) {
+        if (replay) replay_click(heldMouseUp);
+        CFRelease(heldMouseUp);
+        heldMouseUp = NULL;
+    }
+    clickHeld = false;
+    clickResolved = false;
+    clickedSpaceIndex = -1;
+}
+
+static void switch_to_clicked_space(void *context) {
+    // Cut straight to the clicked space; a second slide right after the close
+    // reads as two separate moves
+    const double savedDurationMs = slideDurationMs;
+    slideDurationMs = 0.0;
+    iss_switch_to_index((unsigned int)(uintptr_t)context);
+    slideDurationMs = savedDurationMs;
+}
+
+// How long to wait for Mission Control to finish closing before switching
+static const int kCloseWaitPolls = 60;
+static const useconds_t kCloseWaitPollMicroseconds = 10000;
+
+static void after_close_slide(void *context) {
+    // A slide posted while Mission Control is still on screen moves its view
+    // instead (and wraps to the first space), so wait until it's really gone
+    int polls = 0;
+    while (mission_control_on_screen()) {
+        if (++polls >= kCloseWaitPolls) {
+            return;
+        }
+        usleep(kCloseWaitPollMicroseconds);
+    }
+    // Back on the main queue, where the space predictions live
+    dispatch_async_f(dispatch_get_main_queue(), context, switch_to_clicked_space);
+}
+
+/// Closes Mission Control instantly, then cuts to the clicked space
+static void open_clicked_space(long index) {
+    missionControlOpenedByUs = false;
+    // Instant: Mission Control closes onto the space it shows, not the clicked
+    // one, so any close animation shows the wrong space first
+    iss_enqueue_slide(kCGGestureMotionVertical, -kMissionControlOpenSign, 0.0);
+    // Queued behind the close, so the switch starts from the space it landed on
+    dispatch_async_f(slideQueue, (void *)(uintptr_t)index, after_close_slide);
+}
+
+static bool click_moved(void) {
+    if (!heldMouseDown || !heldMouseUp) return false;
+    CGPoint down = CGEventGetLocation(heldMouseDown);
+    CGPoint up = CGEventGetLocation(heldMouseUp);
+    return fabs(up.x - down.x) > kClickSlop || fabs(up.y - down.y) > kClickSlop;
+}
+
+/// Settles the held click once both its lookup and its mouse up are in
+static void settle_held_click(void) {
+    if (!clickResolved) return;
+    if (clickedSpaceIndex < 0) {
+        // Not a space: hand the click to the Dock as it was
+        release_held_clicks(true);
+        return;
+    }
+    if (!heldMouseUp) return;
+    if (click_moved()) {
+        release_held_clicks(true);
+        return;
+    }
+    const long index = clickedSpaceIndex;
+    release_held_clicks(false);
+    open_clicked_space(index);
+}
+
+static void click_lookup_finished(void *context) {
+    const uintptr_t packed = (uintptr_t)context;
+    // Low bits: generation, so a stale lookup can't settle a newer click
+    if ((unsigned int)(packed & 0xFFFF) != (clickGeneration & 0xFFFF) || !clickHeld) return;
+    clickResolved = true;
+    clickedSpaceIndex = (long)(packed >> 16) - 1;
+    settle_held_click();
+}
+
+typedef struct {
+    CGPoint where;
+    unsigned int generation;
+} ISSClickLookup;
+
+static void run_click_lookup(void *context) {
+    ISSClickLookup *lookup = context;
+    const long index = spaces_bar_index_at(lookup->where);
+    const uintptr_t packed = ((uintptr_t)(index + 1) << 16) | (lookup->generation & 0xFFFF);
+    free(lookup);
+    dispatch_async_f(dispatch_get_main_queue(), (void *)packed, click_lookup_finished);
+}
+
+static CGEventRef mission_control_click(CGEventType type, CGEventRef event) {
+    if (CGEventGetIntegerValueField(event, kCGEventSourceUserData) == kReplayedClickMarker) return event;
+
+    if (type == kCGEventLeftMouseUp) {
+        if (!clickHeld) return event;
+        heldMouseUp = CGEventCreateCopy(event);
+        if (!heldMouseUp) {
+            release_held_clicks(true);
+            return event;
+        }
+        settle_held_click();
+        return NULL;
+    }
+
+    // A click arriving while one is still held: give up on the old one
+    if (clickHeld) release_held_clicks(true);
+    if (!missionControlOpenedByUs) return event;
+    if (!mission_control_on_screen()) {
+        missionControlOpenedByUs = false;
+        return event;
+    }
+
+    ISSClickLookup *lookup = malloc(sizeof(*lookup));
+    heldMouseDown = CGEventCreateCopy(event);
+    if (!lookup || !heldMouseDown) {
+        free(lookup);
+        if (heldMouseDown) CFRelease(heldMouseDown);
+        heldMouseDown = NULL;
+        return event;
+    }
+    clickHeld = true;
+    clickResolved = false;
+    clickGeneration++;
+    lookup->where = CGEventGetLocation(event);
+    lookup->generation = clickGeneration;
+    if (!clickQueue) {
+        clickQueue = dispatch_queue_create("iss.click", DISPATCH_QUEUE_SERIAL);
+    }
+    if (!slideQueue) {
+        slideQueue = dispatch_queue_create("iss.slide", DISPATCH_QUEUE_SERIAL);
+    }
+    dispatch_async_f(clickQueue, lookup, run_click_lookup);
+    return NULL;
+}
+
 static bool iss_perform_switch_gesture(ISSDirection direction, double velocity) {
     lastGestureTime = CFAbsoluteTimeGetCurrent();
 
@@ -1025,6 +1254,7 @@ bool iss_init(void) {
     }
 
     CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp)
+        | CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp)
         | (1ULL << kCGSEventGesture) | (1ULL << kCGSEventDockControl);
     globalTap = CGEventTapCreate(
         kCGSessionEventTap,
@@ -1059,6 +1289,7 @@ bool iss_init(void) {
 
 void iss_destroy(void) {
     syntheticEventsToPassThrough = 0;
+    release_held_clicks(false);
     if (predictionsDict) {
         CFRelease(predictionsDict);
         predictionsDict = NULL;

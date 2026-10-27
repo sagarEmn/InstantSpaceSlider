@@ -1013,7 +1013,12 @@ static void release_held_clicks(bool replay) {
 static void switch_to_clicked_space(void *context) {
     ISSSpaceInfo info; // TEMP debug
     if (iss_get_space_info(&info)) os_log(dbg(), "click: switching %{public}u -> %{public}lu", info.currentIndex, (unsigned long)(uintptr_t)context); // TEMP debug
+    // Cut straight to the clicked space; a second slide right after the close
+    // reads as two separate moves
+    const double savedDurationMs = slideDurationMs;
+    slideDurationMs = 0.0;
     iss_switch_to_index((unsigned int)(uintptr_t)context);
+    slideDurationMs = savedDurationMs;
 }
 
 // How long to wait for Mission Control to finish closing before switching

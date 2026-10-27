@@ -1041,9 +1041,65 @@ static void after_close_slide(void *context) {
     dispatch_async_f(dispatch_get_main_queue(), context, switch_to_clicked_space);
 }
 
-/// Closes Mission Control with the fast slide, then slides to the clicked space
+// Control-Left/Right arrow: macOS's "Move left/right a space" shortcuts
+static const CGKeyCode kLeftArrowKeyCode = 123;
+static const CGKeyCode kRightArrowKeyCode = 124;
+// How long to wait for Mission Control's selection to reach the clicked space
+static const int kSelectionWaitPolls = 40;
+
+typedef struct {
+    unsigned int target;
+    unsigned int steps;
+    CGKeyCode key;
+} ISSSelectionMove;
+
+static void post_space_shortcut(CGKeyCode key) {
+    for (int down = 1; down >= 0; down--) {
+        CGEventRef event = CGEventCreateKeyboardEvent(NULL, key, down);
+        if (!event) return;
+        CGEventSetFlags(event, kCGEventFlagMaskControl | kCGEventFlagMaskSecondaryFn | kCGEventFlagMaskNumericPad);
+        CGEventPost(kCGHIDEventTap, event);
+        CFRelease(event);
+    }
+}
+
+/** @brief Moves Mission Control's selection to the clicked space before it closes.
+ *
+ * Mission Control closes onto the selected space, so closing first shows the
+ * old space for a moment before the switch. While a full-screen space is
+ * selected the main area keeps showing the desktop, so moving the selection
+ * only moves the highlight in the Spaces bar. Runs on slideQueue, ahead of
+ * the close.
+ */
+static void move_mission_control_selection(void *context) {
+    ISSSelectionMove *move = context;
+    for (unsigned int i = 0; i < move->steps; i++) {
+        post_space_shortcut(move->key);
+    }
+    ISSSpaceInfo info;
+    int polls = 0;
+    while (polls++ < kSelectionWaitPolls) {
+        if (iss_get_space_info(&info) && info.currentIndex == move->target) break;
+        usleep(kCloseWaitPollMicroseconds);
+    }
+    os_log(dbg(), "click: selection moved=%{public}d after %{public}d polls", info.currentIndex == move->target, polls); // TEMP debug
+    free(move);
+}
+
+/// Closes Mission Control onto the clicked space
 static void open_clicked_space(long index) {
     missionControlOpenedByUs = false;
+    ISSSpaceInfo info;
+    if (iss_get_space_info(&info) && info.currentIndex != (unsigned int)index) {
+        ISSSelectionMove *move = malloc(sizeof(*move));
+        if (move) {
+            const bool right = (unsigned int)index > info.currentIndex;
+            move->target = (unsigned int)index;
+            move->steps = right ? (unsigned int)index - info.currentIndex : info.currentIndex - (unsigned int)index;
+            move->key = right ? kRightArrowKeyCode : kLeftArrowKeyCode;
+            dispatch_async_f(slideQueue, move, move_mission_control_selection);
+        }
+    }
     // Instant: Mission Control closes onto the space it shows, not the clicked
     // one, so any close animation shows the wrong space first
     iss_enqueue_slide(kCGGestureMotionVertical, -kMissionControlOpenSign, 0.0);

@@ -10,6 +10,7 @@
 #include <float.h>
 #include <mach/mach_time.h>
 #include <math.h>
+#include <os/log.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -117,6 +118,7 @@ static bool horizontalActive = false;
 static bool missionControlOpenedByUs = false;
 static bool clickHeld = false;          // a mouse down is being looked up
 static bool clickResolved = false;      // the lookup has finished for the held click
+static bool clickUnconfirmed = false;   // the window check didn't see Mission Control
 static long clickedSpaceIndex = -1;     // its result: Spaces bar position, or -1
 static CGEventRef heldMouseDown = NULL;
 static CGEventRef heldMouseUp = NULL;
@@ -127,6 +129,14 @@ static const int64_t kReplayedClickMarker = 0x1555C11C;
 // A click that moved farther than this is a drag; leave it to the Dock
 static const double kClickSlop = 6.0;
 static CGEventRef mission_control_click(CGEventType type, CGEventRef event);
+
+/// Mission Control click log; watch it with
+/// log stream --predicate 'subsystem == "com.sagarEmn.InstantSpaceSlider"'
+static os_log_t click_log(void) {
+    static os_log_t log = NULL;
+    if (!log) log = os_log_create("com.sagarEmn.InstantSpaceSlider", "mission-control-click");
+    return log;
+}
 
 // Our macOS 27 swipes re-enter the tap with sourcePid == 0, so count them out instead
 static unsigned int syntheticEventsToPassThrough = 0;
@@ -308,6 +318,7 @@ static CGEventRef vertical_swipe_override(CGEventRef event) {
                 // Negative (swipe up) opens Mission Control
                 const double sign = value < 0.0 ? kMissionControlOpenSign : -kMissionControlOpenSign;
                 missionControlOpenedByUs = sign == kMissionControlOpenSign;
+                os_log(click_log(), "swipe %{public}s Mission Control", missionControlOpenedByUs ? "opens" : "closes");
                 iss_enqueue_slide(kCGGestureMotionVertical, sign, slideDurationMs);
             }
         }
@@ -369,6 +380,7 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
             // Without a real swipe to copy, close if Mission Control looks open, otherwise open
             const double sign = mission_control_on_screen() ? -kMissionControlOpenSign : kMissionControlOpenSign;
             missionControlOpenedByUs = sign == kMissionControlOpenSign;
+            os_log(click_log(), "F3 %{public}s Mission Control", missionControlOpenedByUs ? "opens" : "closes");
             iss_enqueue_slide(kCGGestureMotionVertical, sign, slideDurationMs);
         }
         return NULL;
@@ -936,7 +948,12 @@ static void iss_finish_followed_swipe(double progress, double lastDirection) {
  * AXButton per space, in order. Runs on clickQueue: the Dock can be slow to
  * answer while Mission Control animates, and the tap must never wait on it.
  */
-static long spaces_bar_index_at(CGPoint where) {
+// How many levels above the hit element to look for the thumbnail's button
+static const int kThumbnailButtonDepth = 3;
+
+static long spaces_bar_index_at(CGPoint where, const char **reason, AXError *error) {
+    *reason = "no system-wide element";
+    *error = kAXErrorSuccess;
     AXUIElementRef systemWide = AXUIElementCreateSystemWide();
     if (!systemWide) return -1;
     AXUIElementSetMessagingTimeout(systemWide, 0.25f);
@@ -946,33 +963,52 @@ static long spaces_bar_index_at(CGPoint where) {
     AXUIElementRef list = NULL;
     AXUIElementRef group = NULL;
     CFTypeRef value = NULL;
-    if (AXUIElementCopyElementAtPosition(systemWide, (float)where.x, (float)where.y, &button) != kAXErrorSuccess) {
+    *reason = "no element at the pointer";
+    if ((*error = AXUIElementCopyElementAtPosition(systemWide, (float)where.x, (float)where.y, &button)) != kAXErrorSuccess) {
         button = NULL;
         goto done;
     }
-    if (AXUIElementCopyAttributeValue(button, kAXRoleAttribute, &value) != kAXErrorSuccess) goto done;
-    bool isButton = CFEqual(value, kAXButtonRole);
-    CFRelease(value);
+    // The hit can land on a part inside the thumbnail; walk up to its button
+    bool isButton = false;
+    for (int depth = 0; depth <= kThumbnailButtonDepth; depth++) {
+        *reason = "no role";
+        if ((*error = AXUIElementCopyAttributeValue(button, kAXRoleAttribute, &value)) != kAXErrorSuccess) goto done;
+        isButton = CFEqual(value, kAXButtonRole);
+        CFRelease(value);
+        if (isButton || depth == kThumbnailButtonDepth) break;
+        AXUIElementRef parent = NULL;
+        if (AXUIElementCopyAttributeValue(button, kAXParentAttribute, (CFTypeRef *)&parent) != kAXErrorSuccess) break;
+        CFRelease(button);
+        button = parent;
+    }
+    *reason = "not a button";
     if (!isButton) goto done;
 
-    if (AXUIElementCopyAttributeValue(button, kAXParentAttribute, (CFTypeRef *)&list) != kAXErrorSuccess) {
+    *reason = "no parent list";
+    if ((*error = AXUIElementCopyAttributeValue(button, kAXParentAttribute, (CFTypeRef *)&list)) != kAXErrorSuccess) {
         list = NULL;
         goto done;
     }
-    if (AXUIElementCopyAttributeValue(list, kAXParentAttribute, (CFTypeRef *)&group) != kAXErrorSuccess) {
+    *reason = "no parent group";
+    if ((*error = AXUIElementCopyAttributeValue(list, kAXParentAttribute, (CFTypeRef *)&group)) != kAXErrorSuccess) {
         group = NULL;
         goto done;
     }
-    if (AXUIElementCopyAttributeValue(group, kAXTitleAttribute, &value) != kAXErrorSuccess) goto done;
+    *reason = "no group title";
+    if ((*error = AXUIElementCopyAttributeValue(group, kAXTitleAttribute, &value)) != kAXErrorSuccess) goto done;
     bool isSpacesBar = CFGetTypeID(value) == CFStringGetTypeID() && CFEqual(value, CFSTR("Spaces Bar"));
     CFRelease(value);
+    *reason = "not in the Spaces bar";
     if (!isSpacesBar) goto done;
 
+    *reason = "no list children";
     CFArrayRef children = NULL;
-    if (AXUIElementCopyAttributeValue(list, kAXChildrenAttribute, (CFTypeRef *)&children) != kAXErrorSuccess) goto done;
+    if ((*error = AXUIElementCopyAttributeValue(list, kAXChildrenAttribute, (CFTypeRef *)&children)) != kAXErrorSuccess) goto done;
+    *reason = "button not in its list";
     for (CFIndex i = 0; i < CFArrayGetCount(children); i++) {
         if (CFEqual(CFArrayGetValueAtIndex(children, i), button)) {
             index = (long)i;
+            *reason = "desktop thumbnail";
             break;
         }
     }
@@ -1026,6 +1062,7 @@ static void after_close_slide(void *context) {
     int polls = 0;
     while (mission_control_on_screen()) {
         if (++polls >= kCloseWaitPolls) {
+            os_log(click_log(), "Mission Control still on screen after the close; not switching");
             return;
         }
         usleep(kCloseWaitPollMicroseconds);
@@ -1061,34 +1098,53 @@ static void settle_held_click(void) {
     }
     if (!heldMouseUp) return;
     if (click_moved()) {
+        os_log(click_log(), "NATIVE: click moved (a drag)");
         release_held_clicks(true);
         return;
     }
     const long index = clickedSpaceIndex;
+    os_log(click_log(), "FAST: opening space %{public}ld", index);
     release_held_clicks(false);
     open_clicked_space(index);
-}
-
-static void click_lookup_finished(void *context) {
-    const uintptr_t packed = (uintptr_t)context;
-    // Low bits: generation, so a stale lookup can't settle a newer click
-    if ((unsigned int)(packed & 0xFFFF) != (clickGeneration & 0xFFFF) || !clickHeld) return;
-    clickResolved = true;
-    clickedSpaceIndex = (long)(packed >> 16) - 1;
-    settle_held_click();
 }
 
 typedef struct {
     CGPoint where;
     unsigned int generation;
+    // Filled in by the lookup
+    long index;
+    const char *reason;
+    AXError error;
+    double elapsedMs;
 } ISSClickLookup;
+
+static void click_lookup_finished(void *context) {
+    ISSClickLookup *lookup = context;
+    os_log(click_log(), "lookup: %{public}s (index %{public}ld, AX error %{public}d) in %{public}.0f ms",
+           lookup->reason, lookup->index, (int)lookup->error, lookup->elapsedMs);
+    // A stale lookup can't settle a newer click
+    if (lookup->generation != clickGeneration || !clickHeld) {
+        os_log(click_log(), "lookup arrived after its click was given up");
+        free(lookup);
+        return;
+    }
+    clickResolved = true;
+    clickedSpaceIndex = lookup->index;
+    if (clickedSpaceIndex < 0) {
+        os_log(click_log(), "NATIVE: %{public}s", lookup->reason);
+        // Neither check saw Mission Control: it has closed some other way
+        if (clickUnconfirmed) missionControlOpenedByUs = false;
+    }
+    free(lookup);
+    settle_held_click();
+}
 
 static void run_click_lookup(void *context) {
     ISSClickLookup *lookup = context;
-    const long index = spaces_bar_index_at(lookup->where);
-    const uintptr_t packed = ((uintptr_t)(index + 1) << 16) | (lookup->generation & 0xFFFF);
-    free(lookup);
-    dispatch_async_f(dispatch_get_main_queue(), (void *)packed, click_lookup_finished);
+    const CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
+    lookup->index = spaces_bar_index_at(lookup->where, &lookup->reason, &lookup->error);
+    lookup->elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0;
+    dispatch_async_f(dispatch_get_main_queue(), lookup, click_lookup_finished);
 }
 
 static CGEventRef mission_control_click(CGEventType type, CGEventRef event) {
@@ -1106,12 +1162,16 @@ static CGEventRef mission_control_click(CGEventType type, CGEventRef event) {
     }
 
     // A click arriving while one is still held: give up on the old one
-    if (clickHeld) release_held_clicks(true);
-    if (!missionControlOpenedByUs) return event;
-    if (!mission_control_on_screen()) {
-        missionControlOpenedByUs = false;
-        return event;
+    if (clickHeld) {
+        os_log(click_log(), "NATIVE: new click before the last one was looked up");
+        release_held_clicks(true);
     }
+    if (!missionControlOpenedByUs) return event;
+    // The window check can miss a freshly opened Mission Control; we opened
+    // it, so look up anyway (only a real Spaces bar button counts)
+    clickUnconfirmed = !mission_control_on_screen();
+    os_log(click_log(), "click after opening Mission Control, looking up%{public}s",
+           clickUnconfirmed ? " (window check missed it)" : "");
 
     ISSClickLookup *lookup = malloc(sizeof(*lookup));
     heldMouseDown = CGEventCreateCopy(event);

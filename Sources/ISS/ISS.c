@@ -97,6 +97,7 @@ static bool verticalFired = false;
 
 // Key code the Mission Control (F3) key reports on Apple keyboards
 static const int64_t kMissionControlKeyCode = 160;
+static const int64_t kEscapeKeyCode = 53;
 
 // Synthetic progress sign that opens Mission Control. The trackpad reports a
 // swipe up as negative progress, but the Dock reads our posted sign the other way.
@@ -120,6 +121,7 @@ static bool clickHeld = false;          // a mouse down is being looked up
 static bool clickResolved = false;      // the lookup has finished for the held click
 static bool clickUnconfirmed = false;   // the window check didn't see Mission Control
 static long clickedSpaceIndex = -1;     // its result: Spaces bar position, or -1
+static AXUIElementRef clickedThumbnail = NULL; // and the thumbnail's button
 static CGEventRef heldMouseDown = NULL;
 static CGEventRef heldMouseUp = NULL;
 static unsigned int clickGeneration = 0;
@@ -372,6 +374,12 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
     if (!swipeOverrideEnabled && !missionControlOverride) return event;
 
     if (type == kCGEventKeyDown || type == kCGEventKeyUp) {
+        // Escape closes Mission Control without us
+        if (type == kCGEventKeyDown && missionControlOpenedByUs &&
+            CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) == kEscapeKeyCode) {
+            os_log(click_log(), "Escape closes Mission Control");
+            missionControlOpenedByUs = false;
+        }
         if (!missionControlOverride ||
             CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) != kMissionControlKeyCode) {
             return event;
@@ -418,7 +426,9 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
         if (motion != kCGGestureMotionHorizontal || !swipeOverrideEnabled) return event;
         if (!iss_requires_event_augmentation()) {
             if (CGEventGetIntegerValueField(event, kCGEventGesturePhase) == kCGSGesturePhaseBegan) {
-                followInMissionControl = mission_control_on_screen();
+                // The window check can miss Mission Control; trust our own open too
+                followInMissionControl = missionControlOpenedByUs || mission_control_on_screen();
+                os_log(click_log(), "sideways swipe %{public}s Mission Control", followInMissionControl ? "inside" : "outside");
             }
             // Inside Mission Control the view follows the fingers in either mode;
             // finish it on release like follow mode so a small swipe is snappy
@@ -951,9 +961,72 @@ static void iss_finish_followed_swipe(double progress, double lastDirection) {
 // How many levels above the hit element to look for the thumbnail's button
 static const int kThumbnailButtonDepth = 3;
 
-static long spaces_bar_index_at(CGPoint where, const char **reason, AXError *error) {
+/// Appends "role 'title'" of `element` to `trail`, for the log
+static void append_element_to_trail(AXUIElementRef element, char *trail, size_t size) {
+    char role[48] = "?";
+    char title[48] = "";
+    CFTypeRef value = NULL;
+    if (AXUIElementCopyAttributeValue(element, kAXRoleAttribute, &value) == kAXErrorSuccess && value) {
+        if (CFGetTypeID(value) == CFStringGetTypeID()) CFStringGetCString(value, role, sizeof(role), kCFStringEncodingUTF8);
+        CFRelease(value);
+    }
+    if (AXUIElementCopyAttributeValue(element, kAXTitleAttribute, &value) == kAXErrorSuccess && value) {
+        if (CFGetTypeID(value) == CFStringGetTypeID()) CFStringGetCString(value, title, sizeof(title), kCFStringEncodingUTF8);
+        CFRelease(value);
+    }
+    const size_t used = strlen(trail);
+    snprintf(trail + used, size - used, "%s%s '%s'", used ? " < " : "", role, title);
+}
+
+/** @brief Returns the child of `list` under `where`, or the nearest one across, retained.
+ *
+ * Clicks in the gaps of the Spaces bar, or while it grows from labels into
+ * thumbnails, hit the list itself; the Dock still opens the nearest space.
+ */
+static const char *const kOnBarReason = "on the bar, away from any thumbnail";
+
+// How far beside a thumbnail a click on the bar still counts as that thumbnail
+static const double kThumbnailGapTolerance = 16.0;
+
+static AXUIElementRef spaces_bar_child_near(AXUIElementRef list, CGPoint where) {
+    CFArrayRef children = NULL;
+    if (AXUIElementCopyAttributeValue(list, kAXChildrenAttribute, (CFTypeRef *)&children) != kAXErrorSuccess) return NULL;
+    AXUIElementRef nearest = NULL;
+    double nearestDistance = DBL_MAX;
+    for (CFIndex i = 0; i < CFArrayGetCount(children); i++) {
+        AXUIElementRef child = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
+        CFTypeRef positionValue = NULL;
+        CFTypeRef sizeValue = NULL;
+        CGPoint position = CGPointZero;
+        CGSize size = CGSizeZero;
+        bool hasFrame = AXUIElementCopyAttributeValue(child, kAXPositionAttribute, &positionValue) == kAXErrorSuccess
+            && AXUIElementCopyAttributeValue(child, kAXSizeAttribute, &sizeValue) == kAXErrorSuccess
+            && AXValueGetValue(positionValue, kAXValueTypeCGPoint, &position)
+            && AXValueGetValue(sizeValue, kAXValueTypeCGSize, &size);
+        if (positionValue) CFRelease(positionValue);
+        if (sizeValue) CFRelease(sizeValue);
+        if (!hasFrame) continue;
+        // Distance across only: the bar is one row
+        const double distance = where.x < position.x ? position.x - where.x
+            : where.x > position.x + size.width ? where.x - (position.x + size.width) : 0.0;
+        if (distance < nearestDistance) {
+            nearestDistance = distance;
+            nearest = child;
+        }
+    }
+    // Far from every thumbnail (the add-desktop button, say) isn't a thumbnail click
+    if (nearestDistance > kThumbnailGapTolerance) nearest = NULL;
+    if (nearest) CFRetain(nearest);
+    CFRelease(children);
+    return nearest;
+}
+
+static long spaces_bar_index_at(CGPoint where, const char **reason, AXError *error, AXUIElementRef *outButton,
+                                char *trail, size_t trailSize) {
     *reason = "no system-wide element";
     *error = kAXErrorSuccess;
+    *outButton = NULL;
+    trail[0] = '\0';
     AXUIElementRef systemWide = AXUIElementCreateSystemWide();
     if (!systemWide) return -1;
     AXUIElementSetMessagingTimeout(systemWide, 0.25f);
@@ -968,9 +1041,26 @@ static long spaces_bar_index_at(CGPoint where, const char **reason, AXError *err
         button = NULL;
         goto done;
     }
+    // A hit on the bar itself (between thumbnails): take the nearest thumbnail
+    if (AXUIElementCopyAttributeValue(button, kAXRoleAttribute, &value) == kAXErrorSuccess) {
+        const bool isList = CFEqual(value, kAXListRole);
+        CFRelease(value);
+        if (isList) {
+            append_element_to_trail(button, trail, trailSize);
+            AXUIElementRef child = spaces_bar_child_near(button, where);
+            if (!child) {
+                *reason = kOnBarReason;
+                goto done;
+            }
+            CFRelease(button);
+            button = child;
+        }
+    }
+
     // The hit can land on a part inside the thumbnail; walk up to its button
     bool isButton = false;
     for (int depth = 0; depth <= kThumbnailButtonDepth; depth++) {
+        append_element_to_trail(button, trail, trailSize);
         *reason = "no role";
         if ((*error = AXUIElementCopyAttributeValue(button, kAXRoleAttribute, &value)) != kAXErrorSuccess) goto done;
         isButton = CFEqual(value, kAXButtonRole);
@@ -1017,6 +1107,10 @@ static long spaces_bar_index_at(CGPoint where, const char **reason, AXError *err
 done:
     if (group) CFRelease(group);
     if (list) CFRelease(list);
+    if (button && index >= 0) {
+        *outButton = button;
+        button = NULL;
+    }
     if (button) CFRelease(button);
     CFRelease(systemWide);
     return index;
@@ -1038,6 +1132,10 @@ static void release_held_clicks(bool replay) {
         CFRelease(heldMouseUp);
         heldMouseUp = NULL;
     }
+    if (clickedThumbnail) {
+        CFRelease(clickedThumbnail);
+        clickedThumbnail = NULL;
+    }
     clickHeld = false;
     clickResolved = false;
     clickedSpaceIndex = -1;
@@ -1056,29 +1154,62 @@ static void switch_to_clicked_space(void *context) {
 static const int kCloseWaitPolls = 60;
 static const useconds_t kCloseWaitPollMicroseconds = 10000;
 
+typedef struct {
+    long index;
+    AXUIElementRef thumbnail;
+} ISSClickedSpace;
+
+/// Whether the clicked thumbnail's button still exists, i.e. Mission Control is still up
+static bool thumbnail_on_screen(AXUIElementRef thumbnail) {
+    if (!thumbnail) return false;
+    AXUIElementSetMessagingTimeout(thumbnail, 0.05f);
+    CFTypeRef value = NULL;
+    const AXError error = AXUIElementCopyAttributeValue(thumbnail, kAXRoleAttribute, &value);
+    if (value) CFRelease(value);
+    return error == kAXErrorSuccess;
+}
+
 static void after_close_slide(void *context) {
+    ISSClickedSpace *clicked = context;
     // A slide posted while Mission Control is still on screen moves its view
-    // instead (and wraps to the first space), so wait until it's really gone
+    // instead (and jumps to the last space), so wait until it's really gone.
+    // The window check alone can miss Mission Control; the clicked thumbnail
+    // disappearing confirms it.
     int polls = 0;
-    while (mission_control_on_screen()) {
+    bool windowsUp = true;
+    bool thumbnailUp = true;
+    while ((windowsUp = mission_control_on_screen()) | (thumbnailUp = thumbnail_on_screen(clicked->thumbnail))) {
         if (++polls >= kCloseWaitPolls) {
-            os_log(click_log(), "Mission Control still on screen after the close; not switching");
-            return;
+            os_log(click_log(), "Mission Control still on screen after the close (windows %{public}d, thumbnail %{public}d); not switching",
+                   windowsUp, thumbnailUp);
+            break;
         }
         usleep(kCloseWaitPollMicroseconds);
     }
-    // Back on the main queue, where the space predictions live
-    dispatch_async_f(dispatch_get_main_queue(), context, switch_to_clicked_space);
+    if (clicked->thumbnail) CFRelease(clicked->thumbnail);
+    if (polls < kCloseWaitPolls) {
+        os_log(click_log(), "Mission Control closed after %{public}d polls; switching", polls);
+        // Back on the main queue, where the space predictions live
+        dispatch_async_f(dispatch_get_main_queue(), (void *)(uintptr_t)clicked->index, switch_to_clicked_space);
+    }
+    free(clicked);
 }
 
 /// Closes Mission Control instantly, then cuts to the clicked space
-static void open_clicked_space(long index) {
+static void open_clicked_space(long index, AXUIElementRef thumbnail) {
+    ISSClickedSpace *clicked = malloc(sizeof(*clicked));
+    if (!clicked) {
+        if (thumbnail) CFRelease(thumbnail);
+        return;
+    }
+    clicked->index = index;
+    clicked->thumbnail = thumbnail;
     missionControlOpenedByUs = false;
     // Instant: Mission Control closes onto the space it shows, not the clicked
     // one, so any close animation shows the wrong space first
     iss_enqueue_slide(kCGGestureMotionVertical, -kMissionControlOpenSign, 0.0);
     // Queued behind the close, so the switch starts from the space it landed on
-    dispatch_async_f(slideQueue, (void *)(uintptr_t)index, after_close_slide);
+    dispatch_async_f(slideQueue, clicked, after_close_slide);
 }
 
 static bool click_moved(void) {
@@ -1103,9 +1234,11 @@ static void settle_held_click(void) {
         return;
     }
     const long index = clickedSpaceIndex;
+    AXUIElementRef thumbnail = clickedThumbnail;
+    clickedThumbnail = NULL;
     os_log(click_log(), "FAST: opening space %{public}ld", index);
     release_held_clicks(false);
-    open_clicked_space(index);
+    open_clicked_space(index, thumbnail);
 }
 
 typedef struct {
@@ -1116,24 +1249,30 @@ typedef struct {
     const char *reason;
     AXError error;
     double elapsedMs;
+    AXUIElementRef thumbnail;
+    char trail[256];  // the elements under the pointer, for the log
 } ISSClickLookup;
 
 static void click_lookup_finished(void *context) {
     ISSClickLookup *lookup = context;
-    os_log(click_log(), "lookup: %{public}s (index %{public}ld, AX error %{public}d) in %{public}.0f ms",
-           lookup->reason, lookup->index, (int)lookup->error, lookup->elapsedMs);
+    os_log(click_log(), "lookup: %{public}s (index %{public}ld, AX error %{public}d) in %{public}.0f ms; hit %{public}s",
+           lookup->reason, lookup->index, (int)lookup->error, lookup->elapsedMs, lookup->trail);
     // A stale lookup can't settle a newer click
     if (lookup->generation != clickGeneration || !clickHeld) {
         os_log(click_log(), "lookup arrived after its click was given up");
+        if (lookup->thumbnail) CFRelease(lookup->thumbnail);
         free(lookup);
         return;
     }
     clickResolved = true;
     clickedSpaceIndex = lookup->index;
+    clickedThumbnail = lookup->thumbnail;
     if (clickedSpaceIndex < 0) {
-        os_log(click_log(), "NATIVE: %{public}s", lookup->reason);
-        // Neither check saw Mission Control: it has closed some other way
-        if (clickUnconfirmed) missionControlOpenedByUs = false;
+        os_log(click_log(), "NATIVE: %{public}s; hit %{public}s", lookup->reason, lookup->trail);
+        // A click outside the Spaces bar (a window, empty space) closes Mission
+        // Control, as does anything when neither check saw it open
+        const bool onSpacesBar = strstr(lookup->trail, "'Spaces Bar'") || lookup->reason == kOnBarReason;
+        if (clickUnconfirmed || !onSpacesBar) missionControlOpenedByUs = false;
     }
     free(lookup);
     settle_held_click();
@@ -1142,7 +1281,8 @@ static void click_lookup_finished(void *context) {
 static void run_click_lookup(void *context) {
     ISSClickLookup *lookup = context;
     const CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
-    lookup->index = spaces_bar_index_at(lookup->where, &lookup->reason, &lookup->error);
+    lookup->index = spaces_bar_index_at(lookup->where, &lookup->reason, &lookup->error, &lookup->thumbnail,
+                                                lookup->trail, sizeof(lookup->trail));
     lookup->elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0;
     dispatch_async_f(dispatch_get_main_queue(), lookup, click_lookup_finished);
 }

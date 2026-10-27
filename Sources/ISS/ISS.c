@@ -1044,7 +1044,9 @@ static void after_close_slide(void *context) {
 /// Closes Mission Control with the fast slide, then slides to the clicked space
 static void open_clicked_space(long index) {
     missionControlOpenedByUs = false;
-    iss_enqueue_slide(kCGGestureMotionVertical, -kMissionControlOpenSign, slideDurationMs);
+    // Instant: Mission Control closes onto the space it shows, not the clicked
+    // one, so any close animation shows the wrong space first
+    iss_enqueue_slide(kCGGestureMotionVertical, -kMissionControlOpenSign, 0.0);
     // Queued behind the close, so the switch starts from the space it landed on
     dispatch_async_f(slideQueue, (void *)(uintptr_t)index, after_close_slide);
 }

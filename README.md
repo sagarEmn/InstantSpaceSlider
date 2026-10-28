@@ -18,41 +18,44 @@ https://github.com/user-attachments/assets/037422c9-3fb7-41cd-8da7-58d28c4c8eff
 A simple CLI is provided (`InstantSpaceSlider.app/Contents/MacOS/ISSCli --help`). It uses the speed set in the app; pass `--duration <ms>` to override it (e.g. `ISSCli --duration 0 right` for instant).
 
 
-## Versions: usable-v2, usable-v3 and usable-v4
+## Versions: usable-v2 to usable-v4.2
 
-All three are tagged in this repo. usable-v4 is the latest. To switch between them, check out the tag, rebuild and relaunch:
+All are tagged in this repo. usable-v4.2 is the latest. To switch between them, check out the tag, rebuild and relaunch:
 
 ```sh
-git checkout usable-v4   # or usable-v3, usable-v2
+git checkout usable-v4.2   # or usable-v4.1, usable-v4, usable-v3, usable-v2
 ./dist/build.sh
 pkill -x InstantSpaceSlider; open build/InstantSpaceSlider.app
 ```
 
 After a rebuild, macOS may drop the Accessibility permission. If swipes or shortcuts stop working, remove the app from System Settings > Privacy & Security > Accessibility, add it back, and relaunch it.
 
-| | usable-v2 | usable-v3 | usable-v4 |
-|---|---|---|---|
-| Switching spaces (shortcuts, swipes) | Fast slide | Same | Same |
-| Swipe up / F3 to open Mission Control, swipe down to close | Fast | Same | Same |
-| Swiping left/right inside Mission Control | Native, snappy release | Same | Same |
-| Clicking a desktop in Mission Control's Spaces bar | macOS's own zoom: smooth but slow | Fast: Mission Control closes instantly, then cuts to the clicked desktop. **Bug:** sometimes slow (macOS speed) instead, often on the first click after a pause | Fast, with the v3 slow-click bug fixed |
-| Clicking a window in Mission Control | macOS's own zoom | Same | Same |
-| Click log | No | No | Yes (see below) |
-| Dragging desktops in the Spaces bar to reorder them | Works (native) | **Broken** | **Broken** |
+| | usable-v2 | usable-v3 | usable-v4 | usable-v4.1 | usable-v4.2 |
+|---|---|---|---|---|---|
+| Switching spaces (shortcuts, swipes) | Fast slide | Same | Same | Same | Same |
+| Swipe up / F3 to open Mission Control, swipe down to close | Fast | Same | Same | Same | Same |
+| Swiping left/right inside Mission Control | Native, snappy release | Same | Same, but **sometimes jumps** to the last desktop and back | Fixed | Fixed |
+| Clicking a desktop in Mission Control's Spaces bar | macOS's own zoom: smooth but slow | Fast. **Bug:** sometimes slow (macOS speed), often on the first click after a pause | Fast, v3 bug fixed. **Bug:** rarely opens the wrong desktop after a black screen; clicks in the gaps beside a thumbnail are slow | Fixed | Fixed |
+| Add-desktop (+) button | Works | Works | Works | Works | Works |
+| Close (x) button on a desktop thumbnail | Works | **Opens the desktop instead** | **Opens the desktop instead** | **Opens the desktop instead** | Works |
+| Dragging desktops in the Spaces bar to reorder them | Works | **Broken** | **Broken** | **Broken** | Works |
+| Clicking a window in Mission Control | macOS's own zoom | Same | Same | Same | Same |
+| Click log | No | No | Yes (see below) | Yes | Yes |
 
-What isn't fast or perfect in usable-v3 and usable-v4:
+What isn't fast or perfect from usable-v3 on:
 
 - When you click a desktop other than the highlighted one, the highlighted desktop flashes for a split second before the clicked one appears. Mission Control can only close onto the highlighted desktop, and there's no public way to move the highlight first.
 - Only clicks after opening Mission Control with the three-finger swipe or F3 (with "Speed up Mission Control" on) are sped up. Mission Control opened another way (hot corner, Dock) behaves natively.
 - Window clicks inside Mission Control still use the normal animation.
+- In usable-v4.2, clicks right at a thumbnail's top-left corner, where the close (x) button appears, go to macOS at its normal speed, even on full-screen apps' thumbnails.
 
-Reordering is broken from usable-v3 on, including the latest commit on `mc-close-wait-fix`: the app holds each press on a thumbnail until you let go, so macOS never sees the drag. To reorder desktops, use usable-v2, or turn off "Speed up Mission Control" in Settings while you do it. A fix is planned.
+What changed in each version:
 
-The latest commit, on branch `mc-close-wait-fix` (not tagged yet), builds on usable-v4. It fixes cases where the app missed that Mission Control was open: sideways swipes jumping to the last desktop and back, or a click opening the wrong desktop after a black screen. Clicks in the gaps beside a thumbnail now open that desktop, and the add-desktop (+) button works.
+- **usable-v4:** fixed the v3 slow clicks. The app sometimes didn't notice that Mission Control was open, and some clicks landed on a part inside the thumbnail rather than the thumbnail itself.
+- **usable-v4.1:** fixed more cases where the app missed that Mission Control was open: sideways swipes jumping to the last desktop and back, and a click opening the wrong desktop after a black screen. Clicks in the gaps beside a thumbnail open that desktop, and the add-desktop (+) button is left alone.
+- **usable-v4.2:** dragging desktops to reorder them works again (the press is handed to macOS as soon as you start dragging), and the close (x) button on a thumbnail works.
 
-The v3 bug had two causes: the app sometimes didn't notice that Mission Control was open, and some clicks landed on a part inside the thumbnail rather than the thumbnail itself. usable-v4 handles both.
-
-### Click log (usable-v4)
+### Click log (usable-v4 and later)
 
 Each click in Mission Control logs whether it was sped up (`FAST`) or handed to macOS (`NATIVE`, with the reason). To watch it live:
 

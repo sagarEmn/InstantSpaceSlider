@@ -394,7 +394,7 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
         return NULL;
     }
 
-    if (type == kCGEventLeftMouseDown || type == kCGEventLeftMouseUp) {
+    if (type == kCGEventLeftMouseDown || type == kCGEventLeftMouseUp || type == kCGEventLeftMouseDragged) {
         return missionControlOverride ? mission_control_click(type, event) : event;
     }
 
@@ -1103,6 +1103,20 @@ static long spaces_bar_index_at(CGPoint where, const char **reason, AXError *err
         }
     }
     CFRelease(children);
+    if (index >= 0) {
+        // Where in the thumbnail the click landed, and what's inside it, for the log
+        CFTypeRef positionValue = NULL;
+        CGPoint origin = CGPointZero;
+        if (AXUIElementCopyAttributeValue(button, kAXPositionAttribute, &positionValue) == kAXErrorSuccess) {
+            AXValueGetValue(positionValue, kAXValueTypeCGPoint, &origin);
+            CFRelease(positionValue);
+        }
+        CFIndex childCount = 0;
+        AXUIElementGetAttributeValueCount(button, kAXChildrenAttribute, &childCount);
+        const size_t used = strlen(trail);
+        snprintf(trail + used, trailSize - used, " @ %.0f,%.0f in thumbnail, %ld children",
+                 where.x - origin.x, where.y - origin.y, (long)childCount);
+    }
 
 done:
     if (group) CFRelease(group);
@@ -1290,6 +1304,22 @@ static void run_click_lookup(void *context) {
 static CGEventRef mission_control_click(CGEventType type, CGEventRef event) {
     if (CGEventGetIntegerValueField(event, kCGEventSourceUserData) == kReplayedClickMarker) return event;
 
+    if (type == kCGEventLeftMouseDragged) {
+        if (!clickHeld || !heldMouseDown) return event;
+        const CGPoint down = CGEventGetLocation(heldMouseDown);
+        const CGPoint now = CGEventGetLocation(event);
+        if (fabs(now.x - down.x) <= kClickSlop && fabs(now.y - down.y) <= kClickSlop) return NULL;
+        // A drag (reordering spaces, moving windows): hand the press to the Dock
+        // now, then this drag after it, so the Dock sees the whole gesture
+        os_log(click_log(), "NATIVE: drag");
+        release_held_clicks(true);
+        CGEventRef drag = CGEventCreateCopy(event);
+        if (!drag) return event;
+        replay_click(drag);
+        CFRelease(drag);
+        return NULL;
+    }
+
     if (type == kCGEventLeftMouseUp) {
         if (!clickHeld) return event;
         heldMouseUp = CGEventCreateCopy(event);
@@ -1455,6 +1485,7 @@ bool iss_init(void) {
 
     CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp)
         | CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp)
+        | CGEventMaskBit(kCGEventLeftMouseDragged)
         | (1ULL << kCGSEventGesture) | (1ULL << kCGSEventDockControl);
     globalTap = CGEventTapCreate(
         kCGSessionEventTap,

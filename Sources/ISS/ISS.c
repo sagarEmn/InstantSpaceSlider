@@ -984,6 +984,9 @@ static void append_element_to_trail(AXUIElementRef element, char *trail, size_t 
  * thumbnails, hit the list itself; the Dock still opens the nearest space.
  */
 static const char *const kOnBarReason = "on the bar, away from any thumbnail";
+static const char *const kCloseButtonReason = "the close button on a thumbnail's corner";
+// The close button sits centred on a thumbnail's top-left corner
+static const double kCloseButtonRadius = 18.0;
 
 // How far beside a thumbnail a click on the bar still counts as that thumbnail
 static const double kThumbnailGapTolerance = 16.0;
@@ -1116,6 +1119,11 @@ static long spaces_bar_index_at(CGPoint where, const char **reason, AXError *err
         const size_t used = strlen(trail);
         snprintf(trail + used, trailSize - used, " @ %.0f,%.0f in thumbnail, %ld children",
                  where.x - origin.x, where.y - origin.y, (long)childCount);
+        // The close (x) button on the corner isn't its own element; leave it to the Dock
+        if (hypot(where.x - origin.x, where.y - origin.y) <= kCloseButtonRadius) {
+            index = -1;
+            *reason = kCloseButtonReason;
+        }
     }
 
 done:
@@ -1285,7 +1293,8 @@ static void click_lookup_finished(void *context) {
         os_log(click_log(), "NATIVE: %{public}s; hit %{public}s", lookup->reason, lookup->trail);
         // A click outside the Spaces bar (a window, empty space) closes Mission
         // Control, as does anything when neither check saw it open
-        const bool onSpacesBar = strstr(lookup->trail, "'Spaces Bar'") || lookup->reason == kOnBarReason;
+        const bool onSpacesBar = strstr(lookup->trail, "'Spaces Bar'") || lookup->reason == kOnBarReason
+            || lookup->reason == kCloseButtonReason;
         if (clickUnconfirmed || !onSpacesBar) missionControlOpenedByUs = false;
     }
     free(lookup);

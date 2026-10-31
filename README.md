@@ -18,12 +18,12 @@ https://github.com/user-attachments/assets/037422c9-3fb7-41cd-8da7-58d28c4c8eff
 A simple CLI is provided (`InstantSpaceSlider.app/Contents/MacOS/ISSCli --help`). It uses the speed set in the app; pass `--duration <ms>` to override it (e.g. `ISSCli --duration 0 right` for instant).
 
 
-## Versions: usable-v2 to usable-v4.2
+## Versions: usable-v2 to usable-v5-macos27-golden-gate
 
-All are tagged in this repo. usable-v4.2 is the latest. To switch between them, check out the tag, rebuild and relaunch:
+All are tagged in this repo. `usable-v5-macos27-golden-gate` is the latest and the one to use on macOS 27 (Golden Gate); usable-v4.2 is the latest for macOS 26. To switch between them, check out the tag, rebuild and relaunch:
 
 ```sh
-git checkout usable-v4.2   # or usable-v4.1, usable-v4, usable-v3, usable-v2
+git checkout usable-v5-macos27-golden-gate   # or usable-v4.2, usable-v4.1, usable-v4, usable-v3, usable-v2
 ./dist/build.sh
 pkill -x InstantSpaceSlider; open build/InstantSpaceSlider.app
 ```
@@ -54,6 +54,14 @@ What changed in each version:
 - **usable-v4:** fixed the v3 slow clicks. The app sometimes didn't notice that Mission Control was open, and some clicks landed on a part inside the thumbnail rather than the thumbnail itself.
 - **usable-v4.1:** fixed more cases where the app missed that Mission Control was open: sideways swipes jumping to the last desktop and back, and a click opening the wrong desktop after a black screen. Clicks in the gaps beside a thumbnail open that desktop, and the add-desktop (+) button is left alone.
 - **usable-v4.2:** dragging desktops to reorder them works again (the press is handed to macOS as soon as you start dragging), and the close (x) button on a thumbnail works.
+- **usable-v5-macos27-golden-gate:** first version for macOS 27.2 (Golden Gate). See below.
+
+### macOS 27 (Golden Gate)
+
+On macOS 27 the Dock reads a swipe from the IOHID payload embedded in the event, so the fast finish is made of edited copies of the real swipe's events, and the real release always reaches the Dock.
+
+- Works: follow fingers with a fast finish on release, fast snap-back, and the adjustable slide for shortcuts and the CLI.
+- Not sped up yet, so these run at macOS speed: Mission Control swipes up and down, F3, clicks in the Spaces bar, and sideways swipes inside Mission Control.
 
 ### Click log (usable-v4 and later)
 

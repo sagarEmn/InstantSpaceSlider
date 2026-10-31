@@ -95,8 +95,19 @@ echo "Injecting git SHA: ${GIT_SHA}"
 /usr/libexec/PlistBuddy -c "Set :GitCommitHash ${GIT_SHA}" "${APP_BUNDLE}/Contents/Info.plist"
 
 echo ""
-echo "Signing (ad-hoc)..."
-codesign --force --deep --sign - "${APP_BUNDLE}"
+# A stable identity keeps the Accessibility permission across rebuilds; ad-hoc signatures lose it.
+# It lives in its own keychain so signing never stops at a keychain prompt.
+SIGN_DIR="${HOME}/.config/instantspaceslider"
+SIGN_KEYCHAIN="${SIGN_DIR}/signing.keychain-db"
+SIGN_IDENTITY=""
+SIGN_ARGS=()
+if [[ -f "${SIGN_KEYCHAIN}" ]]; then
+  security unlock-keychain -p "$(cat "${SIGN_DIR}/signing-keychain-password")" "${SIGN_KEYCHAIN}"
+  SIGN_IDENTITY=$(security find-certificate -c "InstantSpaceSlider Local Signing" -Z "${SIGN_KEYCHAIN}" | awk '/SHA-1/{print $3}')
+  SIGN_ARGS=(--keychain "${SIGN_KEYCHAIN}")
+fi
+echo "Signing (${SIGN_IDENTITY:-ad-hoc})..."
+codesign --force --deep --sign "${SIGN_IDENTITY:--}" "${SIGN_ARGS[@]}" "${APP_BUNDLE}"
 
 echo ""
 echo "App bundled at $(pwd)/${APP_BUNDLE} (${BUILD_CONFIG})"

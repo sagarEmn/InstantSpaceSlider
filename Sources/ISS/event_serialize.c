@@ -3,6 +3,7 @@
 #include <ApplicationServices/ApplicationServices.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach_time.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -188,6 +189,95 @@ CGEventRef iss_augment_dock_swipe_event(CGEventRef event) {
 
     CGEventRef result = CGEventCreateFromData(kCFAllocatorDefault, new_data);
     CFRelease(new_data);
+    return result;
+}
+
+// Finds the payload iss_augment_dock_swipe_event appends and real swipes carry
+static long iss_find_iohid_payload(const uint8_t *bytes, long length) {
+    const size_t without_velocity = sizeof(IOHIDSystemQueueElementHeader) + sizeof(IOHIDFluidTouchGestureData);
+    const size_t with_velocity = without_velocity + sizeof(IOHIDVelocityEventData);
+    for (long i = 0; i + 4 + (long)without_velocity <= length; i++) {
+        size_t size = ((size_t)bytes[i] << 8) | bytes[i + 1];
+        if ((size != without_velocity && size != with_velocity) || bytes[i + 2] != ((4205 >> 8) & 0xFF) ||
+            bytes[i + 3] != (4205 & 0xFF) || i + 4 + (long)size > length) {
+            continue;
+        }
+        return i;
+    }
+    return -1;
+}
+
+CGEventRef iss_edit_dock_swipe_event(CGEventRef event, uint8_t phase, double progress, double velocity) {
+    if (!event) {
+        return NULL;
+    }
+
+    CFDataRef data = CGEventCreateData(kCFAllocatorDefault, event);
+    if (!data) {
+        return NULL;
+    }
+    const CFIndex length = CFDataGetLength(data);
+    uint8_t *bytes = (uint8_t *)malloc((size_t)length);
+    if (!bytes) {
+        CFRelease(data);
+        return NULL;
+    }
+    memcpy(bytes, CFDataGetBytePtr(data), (size_t)length);
+    CFRelease(data);
+
+    const long tag = iss_find_iohid_payload(bytes, length);
+    if (tag < 0) {
+        free(bytes);
+        return NULL;
+    }
+    const size_t size = ((size_t)bytes[tag] << 8) | bytes[tag + 1];
+    uint8_t *payload = bytes + tag + 4;
+
+    // The payload runs opposite to the event's fields: positive progress in the fields
+    // is negative in here. Keep whichever way this event's own values say.
+    int32_t real_progress = 0;
+    memcpy(&real_progress, payload + sizeof(IOHIDSystemQueueElementHeader) + offsetof(IOHIDFluidTouchGestureData, swipe_progress), sizeof(real_progress));
+    const double field_progress = CGEventGetDoubleValueField(event, (CGEventField)124);
+    const double sign = field_progress * real_progress > 0.0 ? 1.0 : -1.0;
+
+    const uint64_t timestamp = mach_absolute_time();
+    IOHIDSystemQueueElementHeader header;
+    memcpy(&header, payload, sizeof(header));
+    header.timestamp = timestamp;
+    memcpy(payload, &header, sizeof(header));
+
+    IOHIDFluidTouchGestureData fluid;
+    memcpy(&fluid, payload + sizeof(header), sizeof(fluid));
+    fluid.base.options = (fluid.base.options & 0x00FFFFFF) | ((uint32_t)phase << 24);
+    fluid.swipe_progress = iss_double_to_fixed1616(sign * progress);
+    memcpy(payload + sizeof(header), &fluid, sizeof(fluid));
+
+    if (size == sizeof(header) + sizeof(fluid) + sizeof(IOHIDVelocityEventData)) {
+        IOHIDVelocityEventData motion;
+        memcpy(&motion, payload + sizeof(header) + sizeof(fluid), sizeof(motion));
+        motion.velocity_x = iss_double_to_fixed1616(sign * velocity);
+        motion.velocity_y = motion.velocity_x;
+        memcpy(payload + sizeof(header) + sizeof(fluid), &motion, sizeof(motion));
+    }
+
+    CFDataRef new_data = CFDataCreate(kCFAllocatorDefault, bytes, length);
+    free(bytes);
+    if (!new_data) {
+        return NULL;
+    }
+    CGEventRef result = CGEventCreateFromData(kCFAllocatorDefault, new_data);
+    CFRelease(new_data);
+    if (!result) {
+        return NULL;
+    }
+
+    CGEventSetTimestamp(result, timestamp);
+    CGEventSetIntegerValueField(result, (CGEventField)169, (int64_t)timestamp);
+    CGEventSetIntegerValueField(result, (CGEventField)132, phase);
+    CGEventSetIntegerValueField(result, (CGEventField)134, phase);
+    CGEventSetDoubleValueField(result, (CGEventField)124, progress);
+    CGEventSetDoubleValueField(result, (CGEventField)129, velocity);
+    CGEventSetDoubleValueField(result, (CGEventField)130, velocity);
     return result;
 }
 

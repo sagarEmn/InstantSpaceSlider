@@ -81,6 +81,8 @@ static bool followFingersEnabled = false;
 static bool followTracking = false;
 static double followLastProgress = 0.0;
 static double followLastDirection = 0.0;
+// The latest real Changed; on macOS 27 the finish's frames are edited copies of it
+static CGEventRef followFrameEvent = NULL;
 // Swipes inside Mission Control browse its view rather than switch spaces
 static bool followInMissionControl = false;
 static bool mission_control_on_screen(void);
@@ -140,8 +142,8 @@ static os_log_t click_log(void) {
     return log;
 }
 
-// Our macOS 27 swipes re-enter the tap with sourcePid == 0, so count them out instead
-static unsigned int syntheticEventsToPassThrough = 0;
+// Tags our macOS 27 swipes so the tap can tell them from real trackpad events
+static const int64_t kSyntheticEventTag = 0x1551;
 
 // Gesture speed state
 static double gestureSpeed = 2000.0;
@@ -152,6 +154,10 @@ static dispatch_queue_t slideQueue = NULL;
 static atomic_uint pendingSlides = 0;
 // Release at instant velocity regardless of the speed setting; a slow release brings back the spring tail
 static const double kSlideReleaseVelocity = 2000.0;
+
+// Real swipes' fast finishes queued or running; a new swipe cuts them short
+static atomic_uint finishActive = 0;
+static atomic_bool finishInterrupted = false;
 
 static ISSSwitchCallback switchCallback = NULL;
 
@@ -219,29 +225,55 @@ static ISSDirection iss_direction_from_gesture_value(double value) {
 // Perform a swipe-override switch: get space info, compute target, switch,
 // and notify the handler with the target index.
 static void swipe_override_switch(ISSDirection dir) {
+    // On macOS 27 only the whole gesture landing at once works with fingers down
+    const double savedDurationMs = slideDurationMs;
+    if (iss_requires_event_augmentation()) slideDurationMs = 0.0;
+
     ISSSpaceInfo info;
     if (!iss_get_space_info(&info)) {
         iss_perform_switch_gesture(dir, gestureSpeed);
-        return;
+    } else {
+        unsigned int predicted;
+        unsigned int current = get_prediction(info.displayID, &predicted) ? predicted : info.currentIndex;
+        unsigned int target = dir == ISSDirectionLeft ? current - 1 : current + 1;
+
+        if (iss_switch_with_info(&info, dir)) {
+            set_prediction(info.displayID, target);
+            if (switchCallback) { switchCallback(target); }
+        }
     }
 
-    unsigned int predicted;
-    unsigned int current = get_prediction(info.displayID, &predicted) ? predicted : info.currentIndex;
-    unsigned int target = dir == ISSDirectionLeft ? current - 1 : current + 1;
-
-    if (iss_switch_with_info(&info, dir)) {
-        set_prediction(info.displayID, target);
-        if (switchCallback) { switchCallback(target); }
-    }
+    slideDurationMs = savedDurationMs;
 }
 
 static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durationMs);
-static void iss_finish_followed_swipe(double progress, double lastDirection);
+static void iss_finish_followed_swipe(double progress, double lastDirection, CGEventRef frameEvent,
+                                      CGEventRef releaseEvent);
+static void iss_interrupt_finish(void);
 
 // Let a real horizontal swipe through so the space follows the fingers, then
 // replace its release with a fast finish toward the last direction of movement.
 // Release speed for swipes inside Mission Control (its own setting; see iss_set_mission_control_swipe_speed)
 static double missionControlSwipeSpeed = ISS_DEFAULT_MISSION_CONTROL_SWIPE_SPEED;
+
+/** @brief Replaces a real release with a fast finish, or returns it if it can't.
+ *
+ * On macOS 27 the Dock reads a swipe from the event's embedded payload, and only a
+ * release that says so in there closes the gesture, so the finish is made of edited
+ * copies of the real events rather than synthetic ones.
+ */
+static CGEventRef finish_real_swipe(CGEventRef event, double progress, double direction) {
+    if (!iss_requires_event_augmentation()) {
+        iss_finish_followed_swipe(progress, direction, NULL, NULL);
+        return NULL;
+    }
+    CGEventRef releaseEvent = followFrameEvent ? CGEventCreateCopy(event) : NULL;
+    if (!releaseEvent) return event;
+    CGEventRef frameEvent = followFrameEvent;
+    followFrameEvent = NULL;
+    iss_finish_followed_swipe(progress, direction, frameEvent, releaseEvent);
+    return NULL;
+}
 
 static CGEventRef follow_fingers_swipe(CGEventRef event) {
     CGSGesturePhase phase =
@@ -253,12 +285,21 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
         followTracking = !iss_is_expose_active();
         followLastProgress = progress;
         followLastDirection = progress > 0.0 ? 1.0 : (progress < 0.0 ? -1.0 : 0.0);
+        iss_interrupt_finish();
+        if (followFrameEvent) {
+            CFRelease(followFrameEvent);
+            followFrameEvent = NULL;
+        }
         return event;
 
     case kCGSGesturePhaseChanged:
         if (followTracking && fabs(progress - followLastProgress) >= kFollowDirectionJitter) {
             followLastDirection = progress > followLastProgress ? 1.0 : -1.0;
             followLastProgress = progress;
+        }
+        if (followTracking && iss_requires_event_augmentation()) {
+            if (followFrameEvent) CFRelease(followFrameEvent);
+            followFrameEvent = CGEventCreateCopy(event);
         }
         return event;
 
@@ -278,13 +319,14 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
             }
             return event;
         }
-        iss_finish_followed_swipe(progress, direction);
-        return NULL;
+        return finish_real_swipe(event, progress, direction);
     }
 
     case kCGSGesturePhaseCancelled:
+        if (!followTracking) return event;
         followTracking = false;
-        return event;
+        // A real cancel goes back where it started, fast like any other finish
+        return iss_requires_event_augmentation() ? finish_real_swipe(event, progress, 0.0) : event;
 
     default:
         return event;
@@ -349,23 +391,13 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
     // Re-enable if the system disabled our tap for being too slow
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
         if (globalTap) CGEventTapEnable(globalTap, true);
-        // Anything we posted while disabled never reaches us, so stop waiting for it
-        syntheticEventsToPassThrough = 0;
         return event;
     }
 
     CGSEventType eventType =
         (CGSEventType)CGEventGetIntegerValueField(event, kCGSEventTypeField);
 
-    // Our own events come back within milliseconds; a count left over after the
-    // burst would let real trackpad swipes slip past the override
-    if (syntheticEventsToPassThrough > 0 && !gestures_in_flight()) {
-        syntheticEventsToPassThrough = 0;
-    }
-
-    if (syntheticEventsToPassThrough > 0 &&
-        (eventType == kCGSEventDockControl || eventType == kCGSEventGesture)) {
-        syntheticEventsToPassThrough--;
+    if (CGEventGetIntegerValueField(event, kCGEventSourceUserData) == kSyntheticEventTag) {
         return event;
     }
 
@@ -424,17 +456,18 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
             return vertical_swipe_override(event);
         }
         if (motion != kCGGestureMotionHorizontal || !swipeOverrideEnabled) return event;
-        if (!iss_requires_event_augmentation()) {
-            if (CGEventGetIntegerValueField(event, kCGEventGesturePhase) == kCGSGesturePhaseBegan) {
-                // The window check can miss Mission Control; trust our own open too
-                followInMissionControl = missionControlOpenedByUs || mission_control_on_screen();
-                os_log(click_log(), "sideways swipe %{public}s Mission Control", followInMissionControl ? "inside" : "outside");
-            }
-            // Inside Mission Control the view follows the fingers in either mode;
-            // finish it on release like follow mode so a small swipe is snappy
-            if (followFingersEnabled || followInMissionControl) {
-                return follow_fingers_swipe(event);
-            }
+        if (CGEventGetIntegerValueField(event, kCGEventGesturePhase) == kCGSGesturePhaseBegan) {
+            // The window check can miss Mission Control; trust our own open too
+            followInMissionControl = missionControlOpenedByUs || mission_control_on_screen();
+            os_log(click_log(), "sideways swipe %{public}s Mission Control", followInMissionControl ? "inside" : "outside");
+        }
+        // Inside Mission Control the view follows the fingers in either mode;
+        // finish it on release like follow mode so a small swipe is snappy
+        // Velocity set in an event's fields no longer reaches the Dock on macOS 27,
+        // so swipes in Mission Control are left to it there
+        if (iss_requires_event_augmentation() && followInMissionControl) return event;
+        if (followFingersEnabled || followInMissionControl) {
+            return follow_fingers_swipe(event);
         }
 
         CGSGesturePhase phase =
@@ -496,8 +529,9 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
         }
     }
 
-    // Suppress companion gesture events during active swipe tracking
-    if (eventType == kCGSEventGesture && (swipeTracking || verticalTracking)) {
+    // Suppress companion gesture events during active swipe tracking. Real ones carry
+    // their own copy of the swipe, which would compete with a finish in progress.
+    if (eventType == kCGSEventGesture && (swipeTracking || verticalTracking || atomic_load(&finishActive) > 0)) {
         return NULL;
     }
 
@@ -726,6 +760,9 @@ double iss_swipe_progress_for_phase(CGSGesturePhase phase, ISSDirection directio
 // field is 16.16 fixed point (max ~32767), so the speed setting isn't reused here.
 static const double kModernFlingVelocity = 9999.0;
 
+// Smallest non-zero progress; keeps the direction without visible travel
+static const double kMinimalProgress = 0.000016;
+
 // Cached natural scrolling preference; -1 means re-read it
 static int naturalScrolling = -1;
 
@@ -755,8 +792,29 @@ static double iss_modern_swipe_sign(ISSDirection direction) {
     return naturalScrolling ? sign : -sign;
 }
 
-static bool iss_post_modern_dock_swipe(CGSGesturePhase phase, ISSDirection direction) {
-    const double sign = iss_modern_swipe_sign(direction);
+static bool iss_post_tagged_dock_swipe(CGEventRef event) {
+    // The Dock ignores a DockControl event without a companion gesture event
+    CGEventRef companion = CGEventCreate(NULL);
+    if (!companion) {
+        return false;
+    }
+    CGEventSetIntegerValueField(companion, kCGSEventTypeField, kCGSEventGesture);
+
+    CGEventSetIntegerValueField(event, kCGEventSourceUserData, kSyntheticEventTag);
+    CGEventSetIntegerValueField(companion, kCGEventSourceUserData, kSyntheticEventTag);
+    CGEventPost(kCGSessionEventTap, event);
+    CGEventPost(kCGSessionEventTap, companion);
+    CFRelease(companion);
+    return true;
+}
+
+/** @brief Posts a macOS 27 dock swipe. `progress` and `velocity` use the trackpad's signs
+ * (positive moves right); they're flipped here to the sign the Dock reads from a posted event.
+ * Progress and velocity must point the same way for the release to commit.
+ */
+static bool iss_post_modern_dock_swipe(CGSGesturePhase phase, CGGestureMotion motion, double progress,
+                                       double velocity) {
+    const double sign = iss_modern_swipe_sign(ISSDirectionRight);
 
     CGEventRef ev = CGEventCreate(NULL);
     if (!ev) {
@@ -765,10 +823,8 @@ static bool iss_post_modern_dock_swipe(CGSGesturePhase phase, ISSDirection direc
     CGEventSetIntegerValueField(ev, kCGSEventTypeField, kCGSEventDockControl);
     CGEventSetIntegerValueField(ev, kCGEventGestureHIDType, kIOHIDEventTypeDockSwipe);
     CGEventSetIntegerValueField(ev, kCGEventGesturePhase, phase);
-    CGEventSetIntegerValueField(ev, kCGEventGestureSwipeMotion, kCGGestureMotionHorizontal);
-    // Near-zero progress (the smallest non-zero 16.16 value) leaves nothing to animate.
-    // Full progress switches too, but the previous space flashes before it lands.
-    CGEventSetDoubleValueField(ev, kCGEventGestureSwipeProgress, sign * 0.000016);
+    CGEventSetIntegerValueField(ev, kCGEventGestureSwipeMotion, motion);
+    CGEventSetDoubleValueField(ev, kCGEventGestureSwipeProgress, sign * progress);
     // Fields a real trackpad swipe carries (from FasterSwiper's traces).
     CGEventSetIntegerValueField(ev, kCGEventGesturePhaseAlias, phase);
     CGEventSetDoubleValueField(ev, kCGEventGestureZoomDeltaY, 3.0);
@@ -776,7 +832,8 @@ static bool iss_post_modern_dock_swipe(CGSGesturePhase phase, ISSDirection direc
     CGEventSetDoubleValueField(ev, kCGEventGestureSwipePositionX, 0.1);
     // Match FasterSwiper: only the Ended event carries velocity.
     if (phase == kCGSGesturePhaseEnded) {
-        CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityX, sign * kModernFlingVelocity);
+        CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityX, sign * velocity);
+        CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityY, sign * velocity);
     }
 
     CGEventRef augmented = iss_augment_dock_swipe_event(ev);
@@ -785,22 +842,9 @@ static bool iss_post_modern_dock_swipe(CGSGesturePhase phase, ISSDirection direc
         return false;
     }
 
-    // The Dock ignores a DockControl event without a companion gesture event
-    CGEventRef companion = CGEventCreate(NULL);
-    if (!companion) {
-        CFRelease(augmented);
-        return false;
-    }
-    CGEventSetIntegerValueField(companion, kCGSEventTypeField, kCGSEventGesture);
-
-    if (globalTap) {
-        syntheticEventsToPassThrough += 2;
-    }
-    CGEventPost(kCGSessionEventTap, augmented);
-    CGEventPost(kCGSessionEventTap, companion);
+    const bool posted = iss_post_tagged_dock_swipe(augmented);
     CFRelease(augmented);
-    CFRelease(companion);
-    return true;
+    return posted;
 }
 
 static bool iss_post_legacy_dock_swipe(CGSGesturePhase phase, CGGestureMotion motion, double sign,
@@ -827,19 +871,20 @@ static bool iss_post_legacy_dock_swipe(CGSGesturePhase phase, CGGestureMotion mo
 }
 
 static bool iss_post_dock_swipe(CGSGesturePhase phase, ISSDirection direction, double velocity) {
-    if (iss_requires_event_augmentation()) {
-        return iss_post_modern_dock_swipe(phase, direction);
-    }
     const double progress = iss_swipe_progress_for_phase(phase, direction);
+    if (iss_requires_event_augmentation()) {
+        // Near-zero progress (the smallest non-zero 16.16 value) leaves nothing to animate.
+        // Full progress switches too, but the previous space flashes before it lands.
+        const double sign = direction == ISSDirectionRight ? 1.0 : -1.0;
+        return iss_post_modern_dock_swipe(phase, kCGGestureMotionHorizontal, sign * kMinimalProgress,
+                                          sign * kModernFlingVelocity);
+    }
     return iss_post_legacy_dock_swipe(phase, kCGGestureMotionHorizontal, progress > 0.0 ? 1.0 : -1.0,
                                       velocity, fabs(progress));
 }
 
 // Roughly one frame on a 120Hz display
 static const useconds_t kSlideFrameMicroseconds = 8333;
-
-// Smallest non-zero progress; keeps the direction without visible travel
-static const double kMinimalProgress = 0.000016;
 
 typedef struct {
     CGGestureMotion motion;
@@ -848,6 +893,8 @@ typedef struct {
     double to;        // signed progress the slide ends at (0 = back where it started)
     double velocity;  // signed release velocity
     double durationMs;
+    CGEventRef frameEvent;    // macOS 27 finish of a real swipe: the Changed each frame is edited from
+    CGEventRef releaseEvent;  // and the held real release, which closes the gesture
 } ISSSlideRequest;
 
 /** @brief Drags the swipe from `from` to `to` over the request's duration, then releases.
@@ -858,6 +905,26 @@ typedef struct {
  * instant switch. Runs on slideQueue so the main run loop (and our event tap)
  * stays free while the frames are posted.
  */
+static void iss_post_slide_event(CGSGesturePhase phase, const ISSSlideRequest *request, double progress) {
+    if (iss_requires_event_augmentation()) {
+        // The Dock treats any Ended as a commit; only a cancel stays on the current space
+        const bool staying = phase == kCGSGesturePhaseEnded && request->to == 0.0;
+        const CGSGesturePhase sent = staying ? kCGSGesturePhaseCancelled : phase;
+        const double velocity = (staying || phase != kCGSGesturePhaseEnded) ? 0.0 : copysign(kModernFlingVelocity, request->to);
+        if (!request->frameEvent) {
+            iss_post_modern_dock_swipe(sent, request->motion, progress, velocity);
+            return;
+        }
+        CGEventRef base = phase == kCGSGesturePhaseEnded ? request->releaseEvent : request->frameEvent;
+        CGEventRef edited = iss_edit_dock_swipe_event(base, sent, progress, velocity);
+        // A release has to reach the Dock even if the edit failed, or the gesture never closes
+        if (edited || phase == kCGSGesturePhaseEnded) iss_post_tagged_dock_swipe(edited ? edited : base);
+        if (edited) CFRelease(edited);
+    } else {
+        iss_post_legacy_dock_swipe(phase, request->motion, 1.0, request->velocity, progress);
+    }
+}
+
 static void iss_run_slide(void *context) {
     ISSSlideRequest *request = context;
     const unsigned int frames = (unsigned int)fmax(1.0, request->durationMs * 1000.0 / kSlideFrameMicroseconds);
@@ -865,17 +932,21 @@ static void iss_run_slide(void *context) {
     const double direction = request->to != 0.0 ? request->to : request->from;
 
     if (request->postBegan) {
-        iss_post_legacy_dock_swipe(kCGSGesturePhaseBegan, request->motion, 1.0, request->velocity,
-                                   copysign(kMinimalProgress, direction));
+        iss_post_slide_event(kCGSGesturePhaseBegan, request, copysign(kMinimalProgress, direction));
     }
-    for (unsigned int i = 1; i <= frames; i++) {
+    for (unsigned int i = 1; i <= frames && !atomic_load(&finishInterrupted); i++) {
         usleep(kSlideFrameMicroseconds);
         const double progress = request->from + (request->to - request->from) * i / frames;
-        iss_post_legacy_dock_swipe(kCGSGesturePhaseChanged, request->motion, 1.0, request->velocity,
-                                   progress != 0.0 ? progress : copysign(kMinimalProgress, direction));
+        iss_post_slide_event(kCGSGesturePhaseChanged, request,
+                             progress != 0.0 ? progress : copysign(kMinimalProgress, direction));
     }
-    iss_post_legacy_dock_swipe(kCGSGesturePhaseEnded, request->motion, 1.0, request->velocity,
-                               request->to != 0.0 ? request->to : copysign(kMinimalProgress, direction));
+    iss_post_slide_event(kCGSGesturePhaseEnded, request,
+                         request->to != 0.0 ? request->to : copysign(kMinimalProgress, direction));
+    if (request->frameEvent) {
+        CFRelease(request->frameEvent);
+        CFRelease(request->releaseEvent);
+        atomic_fetch_sub(&finishActive, 1);
+    }
 
     free(request);
     atomic_fetch_sub(&pendingSlides, 1);
@@ -896,6 +967,10 @@ static bool iss_enqueue_slide_request(ISSSlideRequest request) {
     return true;
 }
 
+static void iss_interrupt_finish(void) {
+    atomic_store(&finishInterrupted, atomic_load(&finishActive) > 0);
+}
+
 static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durationMs) {
     return iss_enqueue_slide_request((ISSSlideRequest){
         .motion = motion,
@@ -913,7 +988,8 @@ static bool iss_enqueue_slide(CGGestureMotion motion, double sign, double durati
  * toward the last direction of movement (a full switch, or back to the current
  * space) at the configured speed, then release, so there's no spring tail.
  */
-static void iss_finish_followed_swipe(double progress, double lastDirection) {
+static void iss_finish_followed_swipe(double progress, double lastDirection, CGEventRef frameEvent,
+                                      CGEventRef releaseEvent) {
     double target = 0.0;
     const bool movingAway = lastDirection != 0.0 && (progress == 0.0 || (lastDirection > 0.0) == (progress > 0.0));
     if (movingAway && followInMissionControl) {
@@ -942,14 +1018,27 @@ static void iss_finish_followed_swipe(double progress, double lastDirection) {
     if (!followInMissionControl) {
         lastGestureTime = CFAbsoluteTimeGetCurrent() + durationMs / 1000.0;
     }
-    iss_enqueue_slide_request((ISSSlideRequest){
+    if (frameEvent) {
+        atomic_store(&finishInterrupted, false);
+        atomic_fetch_add(&finishActive, 1);
+    }
+    const bool queued = iss_enqueue_slide_request((ISSSlideRequest){
         .motion = kCGGestureMotionHorizontal,
         .postBegan = false,
         .from = progress,
         .to = target,
         .velocity = target * kSlideReleaseVelocity,
         .durationMs = durationMs,
+        .frameEvent = frameEvent,
+        .releaseEvent = releaseEvent,
     });
+    if (!queued && frameEvent) {
+        // Out of memory: the held release still has to close the gesture
+        iss_post_tagged_dock_swipe(releaseEvent);
+        CFRelease(frameEvent);
+        CFRelease(releaseEvent);
+        atomic_fetch_sub(&finishActive, 1);
+    }
 }
 
 /** @brief Returns the Spaces bar position of the button at `where`, or -1.
@@ -1378,7 +1467,7 @@ static CGEventRef mission_control_click(CGEventType type, CGEventRef event) {
 static bool iss_perform_switch_gesture(ISSDirection direction, double velocity) {
     lastGestureTime = CFAbsoluteTimeGetCurrent();
 
-    if (slideDurationMs > 0.0 && !iss_requires_event_augmentation()) {
+    if (slideDurationMs > 0.0) {
         // Multi-space jumps split the duration so the whole trip takes about one slide
         const double durationMs = slideDurationMs * gestureSpeed / velocity;
         // Keep predictions authoritative until the queued slides have finished
@@ -1456,13 +1545,34 @@ bool iss_is_expose_active(void) {
     return result;
 }
 
+// From macOS 27 WindowManager draws Mission Control, not the Dock, in a window on this layer
+static const int kWindowManagerOverlayLayer = 19;
+
+static bool window_manager_overlay_in_window_list(CFArrayRef windowList) {
+    CFIndex count = CFArrayGetCount(windowList);
+    for (CFIndex i = 0; i < count; i++) {
+        CFDictionaryRef info = (CFDictionaryRef)CFArrayGetValueAtIndex(windowList, i);
+        CFStringRef owner = (CFStringRef)CFDictionaryGetValue(info, CFSTR("kCGWindowOwnerName"));
+        if (!owner || !CFEqual(owner, CFSTR("WindowManager"))) continue;
+        int layer = 0;
+        CFNumberRef layerNum = (CFNumberRef)CFDictionaryGetValue(info, CFSTR("kCGWindowLayer"));
+        if (layerNum) {
+            CFNumberGetValue(layerNum, kCFNumberIntType, &layer);
+        }
+        if (layer == kWindowManagerOverlayLayer) return true;
+    }
+    return false;
+}
+
 /// Mission Control check for the swipe overrides, which need it even when
 /// the "detection" setting (used for the OSD) is off
 static bool mission_control_on_screen(void) {
     CFArrayRef windowList = CGWindowListCopyWindowInfo(
         kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
     if (!windowList) return false;
-    bool result = iss_is_mission_control_detected_in_window_list(windowList);
+    bool result = iss_requires_event_augmentation()
+        ? window_manager_overlay_in_window_list(windowList)
+        : iss_is_mission_control_detected_in_window_list(windowList);
     CFRelease(windowList);
     return result;
 }
@@ -1527,8 +1637,17 @@ bool iss_init(void) {
     return true;
 }
 
+static void iss_slide_queue_drained(void *context) {
+    (void)context;
+}
+
 void iss_destroy(void) {
-    syntheticEventsToPassThrough = 0;
+    // Never quit with the Dock waiting on a release we're holding
+    if (slideQueue) dispatch_sync_f(slideQueue, NULL, iss_slide_queue_drained);
+    if (followFrameEvent) {
+        CFRelease(followFrameEvent);
+        followFrameEvent = NULL;
+    }
     release_held_clicks(false);
     if (predictionsDict) {
         CFRelease(predictionsDict);

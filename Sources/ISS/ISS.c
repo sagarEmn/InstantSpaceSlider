@@ -309,7 +309,7 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
         double velocity = CGEventGetDoubleValueField(event, kCGEventGestureSwipeVelocityX);
         double direction = fabs(velocity) >= kFollowReleaseVelocity ? (velocity > 0.0 ? 1.0 : -1.0)
                                                                     : followLastDirection;
-        if (followInMissionControl) {
+        if (followInMissionControl && !iss_requires_event_augmentation()) {
             // Synthetic progress confuses Mission Control's view, so let the real release
             // through and just make it a quick flick in the last direction of movement
             if (direction != 0.0) {
@@ -463,9 +463,6 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
         }
         // Inside Mission Control the view follows the fingers in either mode;
         // finish it on release like follow mode so a small swipe is snappy
-        // Velocity set in an event's fields no longer reaches the Dock on macOS 27,
-        // so swipes in Mission Control are left to it there
-        if (iss_requires_event_augmentation() && followInMissionControl) return event;
         if (followFingersEnabled || followInMissionControl) {
             return follow_fingers_swipe(event);
         }

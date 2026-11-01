@@ -66,8 +66,8 @@ bool iss_switch_to_index(unsigned int targetIndex);
 /**
  * @brief Enables or disables interception of trackpad horizontal swipe gestures.
  *
- * When enabled, native horizontal dock-swipe gestures are suppressed and
- * replaced with instant space switches (no sliding animation).
+ * When enabled, horizontal swipes are handled by the mode set with
+ * iss_set_swipe_follow_fingers().
  * @param enabled true to intercept, false to pass gestures through normally.
  */
 void iss_set_swipe_override(bool enabled);
@@ -132,7 +132,7 @@ void iss_set_gesture_speed(double speed);
  *
  * The slide is driven by posting swipe progress from 0 to 1 over this time and
  * then releasing at full velocity, so the Dock has no spring tail left to play
- * and focus moves as soon as the slide ends. Ignored on macOS 27+.
+ * and focus moves as soon as the slide ends.
  * @param milliseconds Slide length; 0 switches instantly with no animation.
  */
 void iss_set_slide_duration(double milliseconds);
@@ -143,7 +143,7 @@ void iss_set_slide_duration(double milliseconds);
  * Off (default): any swipe switches instantly in its starting direction.
  * On: the space follows the fingers natively (drag partway, back and forth);
  * on release it slides quickly toward the last direction of movement, either
- * to the neighbouring space or back to the current one. Has no effect on macOS 27+.
+ * to the neighbouring space or back to the current one.
  * @param enabled true to follow the fingers, false for instant swipes.
  */
 void iss_set_swipe_follow_fingers(bool enabled);
@@ -153,7 +153,7 @@ void iss_set_swipe_follow_fingers(bool enabled);
  *
  * When enabled, vertical three/four-finger swipes and the Mission Control (F3)
  * key are replaced with a slide of the configured duration, skipping the Dock's
- * slow spring finish. Has no effect on macOS 27+.
+ * slow spring finish. macOS 26 only; macOS 27.2 handles these itself.
  * @param enabled true to intercept, false to pass them through normally.
  */
 void iss_set_mission_control_override(bool enabled);
@@ -172,7 +172,8 @@ void iss_set_mission_control_override(bool enabled);
  *
  * Inside Mission Control the real swipe is let through and its release velocity is
  * set to this value in the last direction of movement. Real flicks are around 3-5;
- * ISS_INSTANT_MISSION_CONTROL_SWIPE_SPEED skips the animation. Ignored on macOS 27+.
+ * ISS_INSTANT_MISSION_CONTROL_SWIPE_SPEED skips the animation. macOS 26 only; on
+ * macOS 27.2 these swipes finish with the same fast finish as any other swipe.
  * @param velocity Release velocity; 0 or less restores the default.
  */
 void iss_set_mission_control_swipe_speed(double velocity);

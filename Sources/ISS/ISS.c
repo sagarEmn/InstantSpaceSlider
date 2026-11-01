@@ -91,6 +91,10 @@ static bool mission_control_on_screen(void);
 static const double kFollowDirectionJitter = 0.002;
 // A release at least this fast says which way the fingers were last moving
 static const double kFollowReleaseVelocity = 0.5;
+// How far a swipe with no desktop on that side can move, however far the fingers go
+static const double kEdgeOvershoot = 0.05;
+static bool followBlockedLeft = false;
+static bool followBlockedRight = false;
 
 // Mission Control override state (vertical swipes and the Mission Control key)
 static bool missionControlOverrideEnabled = false;
@@ -275,10 +279,24 @@ static CGEventRef finish_real_swipe(CGEventRef event, double progress, double di
     return NULL;
 }
 
+static void update_follow_edges(void) {
+    ISSSpaceInfo info;
+    const bool hasInfo = iss_requires_event_augmentation() && iss_get_space_info(&info);
+    followBlockedLeft = hasInfo && iss_should_block_switch(&info, ISSDirectionLeft);
+    followBlockedRight = hasInfo && iss_should_block_switch(&info, ISSDirectionRight);
+}
+
+/// Where the view should be: toward a side with no desktop, the fingers meet resistance
+static double progress_within_edges(double progress) {
+    if ((progress > 0.0 && !followBlockedRight) || (progress < 0.0 && !followBlockedLeft)) return progress;
+    return copysign(kEdgeOvershoot * tanh(fabs(progress) / kEdgeOvershoot), progress);
+}
+
 static CGEventRef follow_fingers_swipe(CGEventRef event) {
     CGSGesturePhase phase =
         (CGSGesturePhase)CGEventGetIntegerValueField(event, kCGEventGesturePhase);
     double progress = CGEventGetDoubleValueField(event, kCGEventGestureSwipeProgress);
+    const double shownProgress = progress_within_edges(progress);
 
     switch (phase) {
     case kCGSGesturePhaseBegan:
@@ -290,6 +308,7 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
             CFRelease(followFrameEvent);
             followFrameEvent = NULL;
         }
+        update_follow_edges();
         return event;
 
     case kCGSGesturePhaseChanged:
@@ -300,6 +319,10 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
         if (followTracking && iss_requires_event_augmentation()) {
             if (followFrameEvent) CFRelease(followFrameEvent);
             followFrameEvent = CGEventCreateCopy(event);
+            if (shownProgress != progress) {
+                CGEventRef resisted = iss_edit_dock_swipe_event(event, kCGSGesturePhaseChanged, shownProgress, 0.0);
+                if (resisted) return resisted;
+            }
         }
         return event;
 
@@ -319,14 +342,14 @@ static CGEventRef follow_fingers_swipe(CGEventRef event) {
             }
             return event;
         }
-        return finish_real_swipe(event, progress, direction);
+        return finish_real_swipe(event, shownProgress, direction);
     }
 
     case kCGSGesturePhaseCancelled:
         if (!followTracking) return event;
         followTracking = false;
         // A real cancel goes back where it started, fast like any other finish
-        return iss_requires_event_augmentation() ? finish_real_swipe(event, progress, 0.0) : event;
+        return iss_requires_event_augmentation() ? finish_real_swipe(event, shownProgress, 0.0) : event;
 
     default:
         return event;
@@ -989,10 +1012,7 @@ static void iss_finish_followed_swipe(double progress, double lastDirection, CGE
                                       CGEventRef releaseEvent) {
     double target = 0.0;
     const bool movingAway = lastDirection != 0.0 && (progress == 0.0 || (lastDirection > 0.0) == (progress > 0.0));
-    if (movingAway && followInMissionControl) {
-        // Browsing Mission Control doesn't switch spaces; the Dock stops at the ends itself
-        target = lastDirection > 0.0 ? 1.0 : -1.0;
-    } else if (movingAway) {
+    if (movingAway) {
         // Moving away from the current space (or from rest) commits to the space on that side
         ISSDirection dir = iss_direction_from_gesture_value(lastDirection);
         ISSSpaceInfo info;
@@ -1000,7 +1020,8 @@ static void iss_finish_followed_swipe(double progress, double lastDirection, CGE
         // Past the first/last space there's nothing to switch to; snap back instead
         if (!hasInfo || !iss_should_block_switch(&info, dir)) {
             target = lastDirection > 0.0 ? 1.0 : -1.0;
-            if (hasInfo) {
+            // Browsing Mission Control moves its view, not our predictions
+            if (hasInfo && !followInMissionControl) {
                 unsigned int predicted;
                 unsigned int current = get_prediction(info.displayID, &predicted) ? predicted : info.currentIndex;
                 unsigned int newIndex = dir == ISSDirectionLeft ? current - 1 : current + 1;

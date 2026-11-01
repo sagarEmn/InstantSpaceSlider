@@ -16,11 +16,11 @@ A **direct swipe** is a three-finger left/right swipe made on a desktop or full-
 2. **Lifting decides where it goes.** The last direction your fingers were moving picks the destination, not how far you got. You don't have to swipe all the way across: a short swipe toward the next desktop is enough.
 3. **It snaps quickly on release.** From wherever you lifted, the view finishes fast (a full slide takes `slideDurationMs`, and a part-way finish takes proportionally less), then focus lands immediately. There is no slow spring tail.
 4. **It snaps back if you came back.** If your last movement was toward where you started, it returns quickly to where you started.
-5. **It resists at the ends.** If there's no desktop on that side, the view moves only a little, however far your fingers go, then snaps straight back on release. It never shows an empty black desktop.
+5. **It resists at the ends.** If there's no desktop on that side, the view moves a limited, visible amount (`kEdgeOvershoot`, set to 0.30 of a full swipe), however far your fingers go, then snaps straight back on release. It never shows an empty black desktop.
 
 A **Mission Control swipe** is a three-finger left/right swipe while Mission Control is open. It moves between desktops in Mission Control's view and uses the same mechanism.
 
-## Current version: usable-v5.2-macos27.2-golden-gate on macOS 27.2 (Golden Gate)
+## Current version: usable-v5.2.1-macos27.2-golden-gate on macOS 27.2 (Golden Gate)
 
 ### What works
 
@@ -70,10 +70,10 @@ A simple CLI is provided (`InstantSpaceSlider.app/Contents/MacOS/ISSCli --help`)
 
 ## Versions: latest to oldest
 
-All are tagged in this repo. `usable-v5.2-macos27.2-golden-gate` is the latest and the one to use on macOS 27.2 (Golden Gate); usable-v4.2 is the latest for macOS 26. To switch between them, check out the tag, rebuild and relaunch:
+All are tagged in this repo. `usable-v5.2.1-macos27.2-golden-gate` is the latest and the one to use on macOS 27.2 (Golden Gate); usable-v4.2 is the latest for macOS 26. To switch between them, check out the tag, rebuild and relaunch:
 
 ```sh
-git checkout usable-v5.2-macos27.2-golden-gate   # or usable-v5.1-macos27.2-golden-gate, usable-v5-macos27-golden-gate, usable-v4.2, usable-v4.1, usable-v4, usable-v3, usable-v2
+git checkout usable-v5.2.1-macos27.2-golden-gate   # or usable-v5.2-macos27.2-golden-gate, usable-v5.1-macos27.2-golden-gate, usable-v5-macos27-golden-gate, usable-v4.2, usable-v4.1, usable-v4, usable-v3, usable-v2
 ./dist/build.sh
 pkill -x InstantSpaceSlider; open build/InstantSpaceSlider.app
 ```
@@ -82,17 +82,17 @@ After a rebuild, macOS may drop the Accessibility permission. If swipes or short
 
 Newest is on the left. "Same" means the same as the older version to its right.
 
-| | usable-v5.2-macos27.2-golden-gate (macOS 27.2 Golden Gate) | usable-v5.1-macos27.2-golden-gate (macOS 27.2 Golden Gate) | usable-v5-macos27-golden-gate (macOS 27.2 (Golden Gate)) | usable-v4.2 | usable-v4.1 | usable-v4 | usable-v3 | usable-v2 |
-|---| --- | --- |---|---|---|---|---|---|
-| Switching spaces (shortcuts, swipes) | Same | Same | Fast slide; swipes follow your fingers and snap on release | Same as v3 | Same | Same | Same | Fast slide |
-| Swipe up / F3 to open Mission Control, swipe down to close | Same | Same | Left to macOS: swipe up is fast, the rest are default speed | Same as v3 | Same | Same | Same | Fast |
-| Swiping left/right inside Mission Control | Follows your fingers and snaps on release; resists and snaps back past the first or last desktop | Follows your fingers and snaps on release. **Bug:** brief black gap past the first or last desktop | **Slow:** default speed, no snap | Fixed | Fixed | Same, but **sometimes jumps** to the last desktop and back | Same as v2 | Native, snappy release |
-| Clicking a desktop in Mission Control's Spaces bar | Same | Same | **Slow:** left to macOS | Fixed | Fixed | Fast, v3 bug fixed. **Bug:** rarely opens the wrong desktop after a black screen; clicks in the gaps beside a thumbnail are slow | Fast. **Bug:** sometimes slow (macOS speed), often on the first click after a pause | macOS's own zoom: smooth but slow |
-| Add-desktop (+) button | Same | Same | Left to macOS | Works | Works | Works | Works | Works |
-| Close (x) button on a desktop thumbnail | Same | Same | Left to macOS | Works | **Opens the desktop instead** | **Opens the desktop instead** | **Opens the desktop instead** | Works |
-| Dragging desktops in the Spaces bar to reorder them | Same | Same | Left to macOS | Works | **Broken** | **Broken** | **Broken** | Works |
-| Clicking a window in Mission Control | Same | Same | Left to macOS | Same as v3 | Same | Same | Same | macOS's own zoom |
-| Click log | Same | Same | No clicks are handled, so none are logged | Yes | Yes | Yes (see below) | No | No |
+| | usable-v5.2.1-macos27.2-golden-gate (macOS 27.2 Golden Gate) | usable-v5.2-macos27.2-golden-gate (macOS 27.2 Golden Gate) | usable-v5.1-macos27.2-golden-gate (macOS 27.2 Golden Gate) | usable-v5-macos27-golden-gate (macOS 27.2 (Golden Gate)) | usable-v4.2 | usable-v4.1 | usable-v4 | usable-v3 | usable-v2 |
+|---| --- | --- | --- |---|---|---|---|---|---|
+| Switching spaces (shortcuts, swipes) | Same | Same | Same | Fast slide; swipes follow your fingers and snap on release | Same as v3 | Same | Same | Same | Fast slide |
+| Swipe up / F3 to open Mission Control, swipe down to close | Same | Same | Same | Left to macOS: swipe up is fast, the rest are default speed | Same as v3 | Same | Same | Same | Fast |
+| Swiping left/right inside Mission Control | Same, with more visible movement past the first or last desktop | Follows your fingers and snaps on release; resists and snaps back past the first or last desktop | Follows your fingers and snaps on release. **Bug:** brief black gap past the first or last desktop | **Slow:** default speed, no snap | Fixed | Fixed | Same, but **sometimes jumps** to the last desktop and back | Same as v2 | Native, snappy release |
+| Clicking a desktop in Mission Control's Spaces bar | Same | Same | Same | **Slow:** left to macOS | Fixed | Fixed | Fast, v3 bug fixed. **Bug:** rarely opens the wrong desktop after a black screen; clicks in the gaps beside a thumbnail are slow | Fast. **Bug:** sometimes slow (macOS speed), often on the first click after a pause | macOS's own zoom: smooth but slow |
+| Add-desktop (+) button | Same | Same | Same | Left to macOS | Works | Works | Works | Works | Works |
+| Close (x) button on a desktop thumbnail | Same | Same | Same | Left to macOS | Works | **Opens the desktop instead** | **Opens the desktop instead** | **Opens the desktop instead** | Works |
+| Dragging desktops in the Spaces bar to reorder them | Same | Same | Same | Left to macOS | Works | **Broken** | **Broken** | **Broken** | Works |
+| Clicking a window in Mission Control | Same | Same | Same | Left to macOS | Same as v3 | Same | Same | Same | macOS's own zoom |
+| Click log | Same | Same | Same | No clicks are handled, so none are logged | Yes | Yes | Yes (see below) | No | No |
 
 What isn't fast or perfect from usable-v3 to usable-v4.2:
 
@@ -103,6 +103,7 @@ What isn't fast or perfect from usable-v3 to usable-v4.2:
 
 What changed in each version:
 
+- **usable-v5.2.1-macos27.2-golden-gate:** on macOS 27.2 (Golden Gate), swiping past the first or last desktop now moves far enough to see, so the swipe no longer feels like it failed. The limit went from 0.05 to 0.30 of a full swipe.
 - **usable-v5.2-macos27.2-golden-gate:** fixed the black screen when swiping past the first or last desktop in Mission Control on macOS 27.2 (Golden Gate). The view now moves only a little and snaps straight back.
 - **usable-v5.1-macos27.2-golden-gate:** Mission Control swipes on macOS 27.2 (Golden Gate) follow your fingers and snap fast on release, like direct swipes. Known problem: a brief black gap when swiping past the first or last desktop in Mission Control.
 - **usable-v5-macos27-golden-gate:** first version for macOS 27.2 (Golden Gate). Direct swipes follow your fingers and snap fast on release again, and shortcuts and the CLI play the fast slide. Mission Control speedups weren't back yet.

@@ -92,7 +92,7 @@ static const double kFollowDirectionJitter = 0.002;
 // A release at least this fast says which way the fingers were last moving
 static const double kFollowReleaseVelocity = 0.5;
 // How far a swipe with no desktop on that side can move, however far the fingers go
-static const double kEdgeOvershoot = 0.05;
+static const double kEdgeOvershoot = 0.30;
 static bool followBlockedLeft = false;
 static bool followBlockedRight = false;
 

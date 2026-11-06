@@ -17,6 +17,13 @@ os_log_t click_log(void) {
     return log;
 }
 
+os_log_t swipe_log(void) {
+    static dispatch_once_t once;
+    static os_log_t log = NULL;
+    dispatch_once(&once, ^{ log = os_log_create("com.sagarEmn.InstantSpaceSlider", "swipe"); });
+    return log;
+}
+
 static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
                                    CGEventRef event, void *refcon) {
     (void)proxy;
@@ -24,6 +31,8 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
     // Re-enable if the system disabled our tap for being too slow
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        os_log(swipe_log(), "event tap disabled by %{public}s; re-enabling",
+               type == kCGEventTapDisabledByTimeout ? "timeout" : "user input");
         if (globalTap) CGEventTapEnable(globalTap, true);
         return event;
     }

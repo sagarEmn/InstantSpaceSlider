@@ -87,6 +87,8 @@ static const double kMissionControlOpenSign = 1.0;
 /// Mission Control log; watch it with
 /// log stream --predicate 'subsystem == "com.sagarEmn.InstantSpaceSlider"'
 os_log_t click_log(void);
+/// Left/right swipe log: each step of a swipe and its fast finish, to find where one got stuck
+os_log_t swipe_log(void);
 
 // MARK: - spaces.c
 

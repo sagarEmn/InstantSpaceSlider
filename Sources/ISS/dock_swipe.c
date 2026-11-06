@@ -182,6 +182,9 @@ static void iss_post_slide_event(CGSGesturePhase phase, const ISSSlideRequest *r
         CGEventRef base = phase == kCGSGesturePhaseEnded ? request->releaseEvent : request->frameEvent;
         CGEventRef edited = iss_edit_dock_swipe_event(base, sent, progress, velocity);
         // A release has to reach the Dock even if the edit failed, or the gesture never closes
+        if (!edited && phase == kCGSGesturePhaseEnded) {
+            os_log(swipe_log(), "couldn't edit the held release; sending it unedited");
+        }
         if (edited || phase == kCGSGesturePhaseEnded) iss_post_tagged_dock_swipe(edited ? edited : base);
         if (edited) CFRelease(edited);
     } else {
@@ -206,15 +209,19 @@ static void iss_run_slide(void *context) {
     if (request->postBegan) {
         iss_post_slide_event(kCGSGesturePhaseBegan, request, copysign(kMinimalProgress, direction));
     }
+    unsigned int posted = 0;
     for (unsigned int i = 1; i <= frames && !atomic_load(&finishInterrupted); i++) {
         usleep(kSlideFrameMicroseconds);
         const double progress = request->from + (request->to - request->from) * i / frames;
         iss_post_slide_event(kCGSGesturePhaseChanged, request,
                              progress != 0.0 ? progress : copysign(kMinimalProgress, direction));
+        posted = i;
     }
     iss_post_slide_event(kCGSGesturePhaseEnded, request,
                          request->to != 0.0 ? request->to : copysign(kMinimalProgress, direction));
     if (request->frameEvent) {
+        os_log(swipe_log(), "finish done: %{public}u of %{public}u frames%{public}s, release sent", posted, frames,
+               posted < frames ? " (cut short by a new swipe)" : "");
         CFRelease(request->frameEvent);
         CFRelease(request->releaseEvent);
         atomic_fetch_sub(&finishActive, 1);

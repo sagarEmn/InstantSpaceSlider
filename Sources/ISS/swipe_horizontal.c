@@ -51,7 +51,11 @@ static CGEventRef finish_real_swipe(CGEventRef event, double progress, double di
         return NULL;
     }
     CGEventRef releaseEvent = followFrameEvent ? CGEventCreateCopy(event) : NULL;
-    if (!releaseEvent) return event;
+    if (!releaseEvent) {
+        os_log(swipe_log(), "no finish: %{public}s; real release passed to the Dock",
+               followFrameEvent ? "couldn't copy the release" : "no Changed event was seen");
+        return event;
+    }
     CGEventRef frameEvent = followFrameEvent;
     followFrameEvent = NULL;
     iss_finish_followed_swipe(progress, direction, frameEvent, releaseEvent);
@@ -88,6 +92,8 @@ CGEventRef follow_fingers_swipe(CGEventRef event) {
             followFrameEvent = NULL;
         }
         update_follow_edges();
+        os_log(swipe_log(), "began: tracking %{public}d, finishes running %{public}u, blocked left %{public}d right %{public}d",
+               followTracking, atomic_load(&finishActive), followBlockedLeft, followBlockedRight);
         return event;
 
     case kCGSGesturePhaseChanged:
@@ -106,11 +112,16 @@ CGEventRef follow_fingers_swipe(CGEventRef event) {
         return event;
 
     case kCGSGesturePhaseEnded: {
-        if (!followTracking) return event;
+        if (!followTracking) {
+            os_log(swipe_log(), "ended while not tracking; passed to the Dock");
+            return event;
+        }
         followTracking = false;
         double velocity = CGEventGetDoubleValueField(event, kCGEventGestureSwipeVelocityX);
         double direction = fabs(velocity) >= kFollowReleaseVelocity ? (velocity > 0.0 ? 1.0 : -1.0)
                                                                     : followLastDirection;
+        os_log(swipe_log(), "ended: progress %{public}.3f (shown %{public}.3f), velocity %{public}.2f, direction %{public}.0f",
+               progress, shownProgress, velocity, direction);
         if (followInMissionControl && !iss_requires_event_augmentation()) {
             // Synthetic progress confuses Mission Control's view, so let the real release
             // through and just make it a quick flick in the last direction of movement
@@ -125,6 +136,7 @@ CGEventRef follow_fingers_swipe(CGEventRef event) {
     }
 
     case kCGSGesturePhaseCancelled:
+        os_log(swipe_log(), "cancelled: progress %{public}.3f, tracking %{public}d", progress, followTracking);
         if (!followTracking) return event;
         followTracking = false;
         // A real cancel goes back where it started, fast like any other finish
@@ -169,6 +181,8 @@ static void iss_finish_followed_swipe(double progress, double lastDirection, CGE
     if (!followInMissionControl) {
         lastGestureTime = CFAbsoluteTimeGetCurrent() + durationMs / 1000.0;
     }
+    os_log(swipe_log(), "finish: %{public}.3f -> %{public}.0f in %{public}.0f ms%{public}s",
+           progress, target, durationMs, followInMissionControl ? " (Mission Control)" : "");
     if (frameEvent) {
         atomic_store(&finishInterrupted, false);
         atomic_fetch_add(&finishActive, 1);
@@ -185,6 +199,7 @@ static void iss_finish_followed_swipe(double progress, double lastDirection, CGE
     });
     if (!queued && frameEvent) {
         // Out of memory: the held release still has to close the gesture
+        os_log(swipe_log(), "finish couldn't be queued; sending the held release now");
         iss_post_tagged_dock_swipe(releaseEvent);
         CFRelease(frameEvent);
         CFRelease(releaseEvent);
@@ -220,6 +235,7 @@ CGEventRef instant_swipe(CGEventRef event) {
             if (progress != 0.0) {
                 ISSDirection dir = iss_direction_from_gesture_value(progress);
                 swipeFired = true;
+                os_log(swipe_log(), "instant: switching %{public}s", dir == ISSDirectionLeft ? "left" : "right");
                 swipe_override_switch(dir);
             }
         }
